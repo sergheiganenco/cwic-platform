@@ -1,0 +1,125 @@
+﻿version: '3.8'
+
+services:
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    command: npm run dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api-gateway
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./backend/api-gateway
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    environment:
+      - PORT=8000
+      - CORS_ORIGIN=http://localhost:5173
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - DATA_SERVICE_URL=http://data-service:3002
+      - AI_SERVICE_URL=http://ai-service:3003
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3004
+      - NOTIFICATION_SERVICE_URL=http://notification-service:3005
+      - INTEGRATION_SERVICE_URL=http://integration-service:3006
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/api-gateway:/app
+      - /app/node_modules
+    depends_on:
+      - auth-service
+      - data-service
+      - ai-service
+      - pipeline-service
+      - notification-service
+      - integration-service
+
+  auth-service:
+    build:
+      context: ./backend/auth-service
+      dockerfile: Dockerfile.dev
+    environment:
+      - PORT=3001
+      - CORS_ORIGIN=http://localhost:5173
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend/auth-service:/app
+      - /app/node_modules
+
+  data-service:
+    build:
+      context: ./backend/data-service
+      dockerfile: Dockerfile.dev
+    environment:
+      - PORT=3002
+      - CORS_ORIGIN=http://localhost:5173
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./backend/data-service:/app
+      - /app/node_modules
+
+  ai-service:
+    build:
+      context: ./backend/ai-service
+      dockerfile: Dockerfile.dev
+    environment:
+      - PORT=3003
+      - CORS_ORIGIN=http://localhost:5173
+    ports:
+      - "3003:3003"
+    volumes:
+      - ./backend/ai-service:/app
+      - /app/node_modules
+
+  pipeline-service:
+    build:
+      context: ./backend/pipeline-service
+      dockerfile: Dockerfile.dev
+    environment:
+      - PORT=3004
+      - CORS_ORIGIN=http://localhost:5173
+    ports:
+      - "3004:3004"
+    volumes:
+      - ./backend/pipeline-service:/app
+      - /app/node_modules
+
+  notification-service:
+    build:
+      context: ./backend/notification-service
+      dockerfile: Dockerfile.dev
+    environment:
+      - PORT=3005
+      - CORS_ORIGIN=http://localhost:5173
+    ports:
+      - "3005:3005"
+    volumes:
+      - ./backend/notification-service:/app
+      - /app/node_modules
+
+  integration-service:
+    build:
+      context: ./backend/integration-service
+      dockerfile: Dockerfile.dev
+    environment:
+      - PORT=3006
+      - CORS_ORIGIN=http://localhost:5173
+    ports:
+      - "3006:3006"
+    volumes:
+      - ./backend/integration-service:/app
+      - /app/node_modules
+

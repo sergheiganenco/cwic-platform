@@ -1,0 +1,1 @@
+export const LoadingSpinner=()=>(<div className='animate-spin'>⏳</div>);

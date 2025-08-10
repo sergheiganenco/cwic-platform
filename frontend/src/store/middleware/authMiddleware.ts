@@ -1,0 +1,1 @@
+export const authMiddleware=()=>(next:any)=>(action:any)=>next(action);

@@ -1,0 +1,1 @@
+export const loggingMiddleware=()=>(next:any)=>(action:any)=>next(action);
