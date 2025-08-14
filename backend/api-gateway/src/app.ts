@@ -1,25 +1,24 @@
-﻿import express from 'express';
-import cors from 'cors';
+﻿import cors from 'cors';
+import 'dotenv/config';
+import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import 'dotenv/config';
 
-const app = express();
-const PORT = process.env.PORT || 8000;
+export const app = express();
 
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 app.use(morgan('dev'));
 
+// Health & root
 app.get('/health', (_req, res) => {
-  res.json({ service: 'api-gateway', status: 'ok' });
+  res.json({ service: process.env.SERVICE_NAME || 'api-gateway', status: 'ok' });
 });
 
 app.get('/', (_req, res) => {
-  res.json({ service: 'api-gateway', message: 'CWIC api-gateway up and running' });
+  res.json({ service: process.env.SERVICE_NAME || 'api-gateway', message: 'Service up and running' });
 });
 
-app.listen(PORT, () => {
-  console.log([CWIC::api-gateway] listening on port 8000);
-});
+// TODO: mount proxy routes to other services later

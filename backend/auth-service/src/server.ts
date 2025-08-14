@@ -1,4 +1,8 @@
-﻿import app from "./app";
-const port = process.env.PORT ? Number(process.env.PORT) : 0;
-const resolved = port || 3000;
-app.listen(resolved, () => console.log(`Service listening on :${resolved}`));
+﻿import { app } from './app.js';
+
+const fallback = Number(process.env.FALLBACK_PORT || 3001);
+const port = Number(process.env.PORT || fallback);
+
+app.listen(port, () => {
+  console.log(`[${process.env.SERVICE_NAME || 'auth-service'}] listening on :${port}`);
+});
