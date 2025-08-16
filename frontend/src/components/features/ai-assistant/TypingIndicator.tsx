@@ -1,10 +1,27 @@
-export function TypingIndicator() {
-  return (
-    <div className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-600">
-      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-gray-500" />
-      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-gray-500 [animation-delay:.15s]" />
-      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-gray-500 [animation-delay:.3s]" />
-      <span className="ml-1">Assistant is typing…</span>
-    </div>
-  )
+import React from 'react';
+
+interface TypingIndicatorProps {
+  className?: string;
+  message?: string;
 }
+
+export const TypingIndicator: React.FC<TypingIndicatorProps> = ({ 
+  className = '', 
+  message = 'AI is thinking...' 
+}) => {
+  return (
+    <div className={`typing-indicator ${className}`}>
+      <div className="typing-bubble">
+        <div className="typing-dots">
+          <span className="dot"></span>
+          <span className="dot"></span>
+          <span className="dot"></span>
+        </div>
+        <div className="typing-message">{message}</div>
+      </div>
+    </div>
+  );
+};
+
+// Default export for compatibility
+export default TypingIndicator;

@@ -1,8 +1,8 @@
-﻿import { app } from './app.js';
+﻿import 'dotenv/config'; // load env early
+import process from 'node:process';
+import { app } from './app.js'; // NodeNext: use .js for relative import
 
-const fallback = Number(process.env.FALLBACK_PORT || 3001);
-const port = Number(process.env.PORT || fallback);
-
+const port = Number(process.env.PORT) || 8001;
 app.listen(port, () => {
-  console.log(`[${process.env.SERVICE_NAME || 'auth-service'}] listening on :${port}`);
+  console.log(`auth-service listening on :${port}`);
 });

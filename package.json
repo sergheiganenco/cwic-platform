@@ -23,7 +23,7 @@
   },
   "keywords": [
     "data-governance",
-    "ai-assistant", 
+    "ai-assistant",
     "ci-cd",
     "workflow-automation",
     "data-platform"
@@ -31,7 +31,10 @@
   "author": "Your Company",
   "license": "MIT",
   "devDependencies": {
+    "@types/express": "^4.17.23",
+    "@types/express-serve-static-core": "^4.19.6",
     "concurrently": "^8.2.0",
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "cross-env-shell": "^7.0.3"
   }
 }

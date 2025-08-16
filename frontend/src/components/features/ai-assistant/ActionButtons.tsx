@@ -1,14 +1,56 @@
-import { Button } from '@components/ui/Button';
-export function ActionButtons({ value, onChange, onSend, disabled }: { value: string; onChange: (v:string)=>void; onSend: ()=>void; disabled?: boolean }) {
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        value={value}
-        onChange={(e)=>onChange(e.target.value)}
-        placeholder="Type a message…"
-        className="flex-1 rounded-xl border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-      />
-      <Button onClick={onSend} disabled={disabled}>Send</Button>
-    </div>
-  )
+import React from 'react';
+
+interface ActionButtonsProps {
+  onClearChat: () => void;
+  onRetry: () => void;
+  disabled?: boolean;
+  messageCount: number;
+  characterCount: number;
+  maxCharacters?: number;
 }
+
+export const ActionButtons: React.FC<ActionButtonsProps> = ({
+  onClearChat,
+  onRetry,
+  disabled = false,
+  messageCount,
+  characterCount,
+  maxCharacters = 500
+}) => {
+  return (
+    <div className="action-buttons">
+      <div className="button-group">
+        <button
+          onClick={onClearChat}
+          disabled={disabled || messageCount === 0}
+          className="action-btn clear-btn"
+          title="Clear chat history"
+        >
+          🗑️ Clear Chat
+        </button>
+        
+        <button
+          onClick={onRetry}
+          disabled={disabled || messageCount === 0}
+          className="action-btn retry-btn"
+          title="Retry last message"
+        >
+          🔄 Retry
+        </button>
+      </div>
+      
+      <div className="chat-info">
+        <span className="message-count">
+          Messages: {messageCount}
+        </span>
+        
+        <span className={`character-count ${characterCount > maxCharacters * 0.9 ? 'warning' : ''}`}>
+          {characterCount}/{maxCharacters}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+// Default export for compatibility
+export default ActionButtons;
