@@ -1,21 +1,16 @@
-﻿import cors from 'cors';
-import 'dotenv/config';
+﻿import compression from 'compression';
+import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
-import morgan from 'morgan';
 
 export const app = express();
 
-const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
 app.use(helmet());
-app.use(cors({ origin: corsOrigin }));
+app.use(cors());
+app.use(compression());
 app.use(express.json());
-app.use(morgan('dev'));
 
+// Health endpoint for Docker HEALTHCHECK
 app.get('/health', (_req, res) => {
-  res.json({ service: process.env.SERVICE_NAME || 'auth-service', status: 'ok' });
-});
-
-app.get('/', (_req, res) => {
-  res.json({ service: process.env.SERVICE_NAME || 'auth-service', message: 'Service up and running' });
+  res.status(200).json({ status: 'ok', service: 'auth-service' });
 });

@@ -1,24 +1,26 @@
-﻿import cors from 'cors';
+﻿import compression from 'compression';
+import cors from 'cors';
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 
+import { healthCheck } from './middleware/healthCheck.js';
+
 export const app = express();
 
-const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173').split(',');
 app.use(helmet());
-app.use(cors({ origin: corsOrigin }));
-app.use(express.json());
+app.use(cors({ origin: corsOrigins }));
+app.use(compression());
+app.use(express.json({ limit: '2mb' }));
 app.use(morgan('dev'));
 
-// Health & root
-app.get('/health', (_req, res) => {
-  res.json({ service: process.env.SERVICE_NAME || 'api-gateway', status: 'ok' });
-});
-
+// Root + unified health
 app.get('/', (_req, res) => {
-  res.json({ service: process.env.SERVICE_NAME || 'api-gateway', message: 'Service up and running' });
+  res.json({
+    service: process.env.SERVICE_NAME || 'api-gateway',
+    status: 'ok'
+  });
 });
-
-// TODO: mount proxy routes to other services later
+app.get('/health', healthCheck);

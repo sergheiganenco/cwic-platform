@@ -1,11 +1,62 @@
-export function MessageBubble({ role, text, timestamp }: { role: 'user'|'assistant'|'system'; text: string; timestamp?: string }) {
-  const isUser = role === 'user'
+import React from 'react';
+
+export interface AIMessage {
+  id: string;
+  type: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: Date | string;
+  metadata?: {
+    processingTime?: number;
+    confidence?: number;   // 0..1
+    sources?: string[];
+  };
+}
+
+export interface MessageBubbleProps {
+  message: AIMessage;
+  showMetadata?: boolean;
+}
+
+export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, showMetadata = false }) => {
+  const isUser = message.type === 'user';
+  const ts = message.timestamp instanceof Date ? message.timestamp : new Date(message.timestamp);
+
+  const formatTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  const lines = String(message.content || '').split('\n');
+
+  const hasProcessing = typeof message.metadata?.processingTime === 'number';
+  const hasConfidence = typeof message.metadata?.confidence === 'number';
+  const hasSources   = Array.isArray(message.metadata?.sources) && message.metadata!.sources!.length > 0;
+
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[75%] rounded-2xl px-3 py-2 text-sm ${isUser ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-900'}`}>
-        <div>{text}</div>
-        {timestamp && <div className="mt-1 text-[10px] opacity-70">{new Date(timestamp).toLocaleTimeString()}</div>}
+    <div className={`message-bubble ${isUser ? 'user' : 'assistant'}`}>
+      <div className="message-content">
+        <div className="message-text">
+          {lines.map((line, i) => (
+            <React.Fragment key={i}>
+              {line}{i < lines.length - 1 && <br />}
+            </React.Fragment>
+          ))}
+        </div>
+
+        <div className="message-meta">
+          <span className="timestamp">{formatTime(ts)}</span>
+          {showMetadata && (
+            <>
+              {hasProcessing && <span className="processing-time">{message.metadata!.processingTime}ms</span>}
+              {hasConfidence && (
+                <span className="confidence">
+                  {Math.round((message.metadata!.confidence as number) * 100)}% confident
+                </span>
+              )}
+              {hasSources && <span className="sources">Sources: {message.metadata!.sources!.join(', ')}</span>}
+            </>
+          )}
+        </div>
       </div>
     </div>
-  )
-}
+  );
+};
+
+export default MessageBubble;
