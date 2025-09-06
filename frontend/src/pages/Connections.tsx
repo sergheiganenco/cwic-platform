@@ -1,205 +1,176 @@
 // src/pages/Connections.tsx
-import type { DataSource, TestResult } from '@/types/dataSources'
-import { ConnectionForm } from '@components/features/connections/ConnectionForm'
-import { ConnectionTest } from '@components/features/connections/ConnectionTest'
-import { DataSourceList } from '@components/features/connections/DataSourceList'
-import { HealthMonitor } from '@components/features/connections/HealthMonitor'
-import { Button } from '@components/ui/Button'
-import { Card, CardContent } from '@components/ui/Card'
-import { Modal } from '@components/ui/Modal'
-import { useDataSources } from '@hooks/useDataSources'
-import { AlertTriangle, CheckCircle, Database, Plus } from 'lucide-react'
-import * as React from 'react'
+import AddConnectionWizard from '@/components/features/data-sources/AddConnectionWizard';
+import DataSourceCard from '@/components/features/data-sources/DataSourceCard';
+import { useDataSources } from '@/hooks/useDataSources';
+import type { DataSourceStatus, DataSourceType } from '@/types/dataSources';
+import React from 'react';
 
-export const Connections: React.FC = () => {
-  const { sources, isLoading } = useDataSources()
-  const items: DataSource[] = Array.isArray(sources) ? sources : []
+export function Connections() {
+  const {
+    items, page, setPage, limit, setLimit, total,
+    status, setStatus, type, setType,
+    loading, error, refresh, summary,
+    create, remove, test, sync,
+  } = useDataSources();
 
-  const [selectedId, setSelectedId] = React.useState<string | null>(null)
-  const [showConnectionForm, setShowConnectionForm] = React.useState(false)
-  const [showConnectionTest, setShowConnectionTest] = React.useState(false)
-  const [activeTab, setActiveTab] = React.useState<'sources' | 'health'>('sources')
-
-  const selectedSource = React.useMemo(
-    () => items.find((s) => s.id === selectedId) ?? null,
-    [items, selectedId]
-  )
-
-  // Resilient counts: treat 'down' or 'error' as errors; keep 'warning' and 'healthy'
-  const stats = React.useMemo(() => {
-    const total = items.length
-    const healthy = items.filter((ds) => ds.status === 'healthy').length
-    const warning = items.filter((ds) => ds.status === 'warning').length
-    const error = items.filter((ds) => ds.status === 'down' || ds.status === 'error').length
-    return { total, healthy, warning, error }
-  }, [items])
-
-  function handleSelect(id: string) {
-    setSelectedId(id)
-    setShowConnectionTest(true)
-  }
-
-  async function handleSave(draft: Partial<DataSource>) {
-    // TODO: call your API; on success, refresh sources in store/react-query
-    console.log('Save connection', draft)
-    setShowConnectionForm(false)
-  }
-
-  async function testConnection(conn?: DataSource): Promise<TestResult> {
-    // TODO: replace with real API that validates the connection
-    console.log('Testing connection', (conn ?? selectedSource)?.id)
-    await new Promise((r) => setTimeout(r, 800))
-    return 'ok'
-  }
+  const pages = Math.max(1, Math.ceil(total / limit));
+  const [open, setOpen] = React.useState(false);
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Data Sources</h1>
-          <p className="mt-1 text-gray-600">
-            Manage connections to Azure SQL, Synapse, Fabric, and other data sources.
-          </p>
+          <h1 className="text-2xl font-semibold">Data Sources</h1>
+          <p className="text-sm text-gray-500">Manage connections to databases, warehouses, storage, streams, and APIs.</p>
         </div>
-        <Button onClick={() => setShowConnectionForm(true)}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Connection
-        </Button>
+        <button
+          onClick={() => setOpen(true)}
+          className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          + Add Connection
+        </button>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-4">
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">Total Sources</p>
-                <p className="text-3xl font-bold text-gray-900">{stats.total}</p>
-              </div>
-              <Database className="h-8 w-8 text-gray-600" aria-hidden />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">Healthy</p>
-                <p className="text-3xl font-bold text-green-600">{stats.healthy}</p>
-              </div>
-              <CheckCircle className="h-8 w-8 text-green-600" aria-hidden />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">Warning</p>
-                <p className="text-3xl font-bold text-yellow-600">{stats.warning}</p>
-              </div>
-              <AlertTriangle className="h-8 w-8 text-yellow-600" aria-hidden />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">Error</p>
-                <p className="text-3xl font-bold text-red-600">{stats.error}</p>
-              </div>
-              <AlertTriangle className="h-8 w-8 text-red-600" aria-hidden />
-            </div>
-          </CardContent>
-        </Card>
+      {/* KPIs */}
+      <div className="grid grid-cols-4 gap-4">
+        <Stat label="Total Sources" value={summary.total} icon="💽" />
+        <Stat label="Healthy" value={summary.healthy} icon="✅" />
+        <Stat label="Warning" value={summary.warning} icon="⚠️" />
+        <Stat label="Error" value={summary.error} icon="⛔" />
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-200">
-        <nav className="-mb-px flex space-x-8" aria-label="Connections sections">
-          <TabButton onClick={() => setActiveTab('sources')} active={activeTab === 'sources'}>
-            Data Sources
-          </TabButton>
-          <TabButton onClick={() => setActiveTab('health')} active={activeTab === 'health'}>
-            Health Monitor
-          </TabButton>
-        </nav>
+      {/* Filters */}
+      <div className="flex flex-wrap items-end gap-3">
+        <Select
+          label="Status"
+          value={status}
+          onChange={v => setStatus(v as DataSourceStatus | '')}
+          options={['', 'pending','connected','disconnected','error','warning','syncing','testing']}
+        />
+        <Select
+          label="Type"
+          value={type}
+          onChange={v => setType(v as DataSourceType | '')}
+          options={ALL_TYPES}
+        />
+        <Select
+          label="Page size"
+          value={String(limit)}
+          onChange={v => setLimit(Number(v))}
+          options={['10','20','50','100']}
+        />
+        <div className="ml-auto text-sm text-gray-500">Page {page} / {pages}</div>
       </div>
 
       {/* Content */}
-      <div className="mt-6">
-        {activeTab === 'sources' ? (
-          <Card>
-            <CardContent>
-              <DataSourceList items={items} onSelect={handleSelect} />
-              {isLoading && (
-                <div className="mt-3 text-sm text-gray-500">Loading sources…</div>
-              )}
-            </CardContent>
-          </Card>
-        ) : (
-          // Keeping your HealthMonitor API (expects { dataSources })
-          <HealthMonitor dataSources={items} />
-        )}
+      {loading ? (
+        <Box>Loading…</Box>
+      ) : error ? (
+        <Box className="border-red-200 bg-red-50 text-red-700">{error}</Box>
+      ) : items.length === 0 ? (
+        <Box>No data sources connected.</Box>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+          {items.map(ds => (
+            <DataSourceCard
+              key={ds.id}
+              ds={ds}
+              onTest={async id => {
+                const r = await test(id);
+                alert(r.success ? 'Connection OK' : `Failed: ${r.error ?? 'Unknown error'}`);
+              }}
+              onSync={async id => {
+                const r = await sync(id);
+                alert(`Sync ${r.status} (${r.syncId})`);
+              }}
+              onDelete={async id => {
+                if (confirm('Delete this source?')) await remove(id);
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      <div className="flex items-center justify-end gap-2">
+        <button
+          disabled={page <= 1}
+          onClick={() => setPage(p => p - 1)}
+          className="rounded-lg border px-3 py-1 text-sm disabled:opacity-50"
+        >
+          Prev
+        </button>
+        <button
+          disabled={page >= pages}
+          onClick={() => setPage(p => p + 1)}
+          className="rounded-lg border px-3 py-1 text-sm disabled:opacity-50"
+        >
+          Next
+        </button>
+        <button onClick={() => refresh()} className="ml-2 rounded-lg border px-3 py-1 text-sm">
+          Refresh
+        </button>
       </div>
 
-      {/* Add / Edit Connection */}
-      <Modal
-        isOpen={showConnectionForm}
-        onClose={() => setShowConnectionForm(false)}
-        title={selectedSource ? 'Edit Connection' : 'Add New Data Source'}
-        size="lg"
-      >
-        <ConnectionForm
-          initial={selectedSource ?? undefined}
-          onSave={handleSave}
-          onClose={() => setShowConnectionForm(false)}
-        />
-      </Modal>
-
-      {/* Connection Test */}
-      <Modal
-        isOpen={showConnectionTest}
-        onClose={() => setShowConnectionTest(false)}
-        title={selectedSource ? `Connection Details — ${selectedSource.name}` : 'Connection Details'}
-        size="lg"
-      >
-        {selectedSource ? (
-          <ConnectionTest connection={selectedSource} onTest={testConnection} />
-        ) : (
-          <div className="text-sm text-gray-600">Select a data source to test.</div>
-        )}
-      </Modal>
+      {/* New Wizard (searchable gallery + dynamic fields) */}
+      <AddConnectionWizard
+        open={open}
+        onClose={() => setOpen(false)}
+        onCreate={create}
+        onTestAfterCreate={async (id) => test(id)}
+      />
     </div>
-  )
+  );
 }
 
-function TabButton({
-  active,
-  onClick,
-  children,
+/* ---------- helpers ---------- */
+const ALL_TYPES: (DataSourceType | '')[] = [
+  '',
+  'postgresql','mysql','mssql','oracle','mongodb','redis',
+  's3','azure-blob','gcs',
+  'snowflake','bigquery','redshift','databricks',
+  'api','file','kafka','elasticsearch'
+];
+
+function Stat({ label, value, icon }: { label: string; value: number; icon: string }) {
+  return (
+    <div className="rounded-2xl border bg-white p-4 shadow-sm">
+      <div className="text-sm text-gray-500">{label}</div>
+      <div className="mt-1 flex items-baseline gap-2">
+        <div className="text-2xl font-semibold">{value}</div>
+        <div className="text-xl">{icon}</div>
+      </div>
+    </div>
+  );
+}
+
+function Box({ children, className = '' }: React.PropsWithChildren<{ className?: string }>) {
+  return <div className={`rounded-xl border p-6 text-sm text-gray-600 ${className}`}>{children}</div>;
+}
+
+function Select({
+  label, value, onChange, options,
 }: {
-  active: boolean
-  onClick: () => void
-  children: React.ReactNode
+  label: string;
+  value: string | number;
+  onChange(v: string): void;
+  options: (string | number)[];
 }) {
   return (
-    <button
-      onClick={onClick}
-      className={[
-        'border-b-2 py-2 px-1 text-sm font-medium',
-        active ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700',
-      ].join(' ')}
-      aria-current={active ? 'page' : undefined}
-    >
-      {children}
-    </button>
-  )
+    <div>
+      <label className="block text-xs font-semibold text-gray-600">{label}</label>
+      <select
+        className="mt-1 rounded-lg border p-2 text-sm"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+      >
+        {options.map(o => (
+          <option key={o} value={o}>
+            {o === '' ? 'All' : o}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 }
-
-export default Connections

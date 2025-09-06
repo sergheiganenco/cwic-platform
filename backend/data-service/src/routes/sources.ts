@@ -1,77 +1,187 @@
-import { Router } from 'express';
-import { z } from 'zod';
-import { pool } from '../db.js';
-import { HttpError } from '../middleware/error.js';
-import { pageParams } from '../utils/pagination.js';
+// backend/data-service/src/routes/sources.ts
+import { Router, type RequestHandler } from 'express';
+import { body, param, query } from 'express-validator';
+import { DataSourceController } from '../controllers/DataSourceController';
+import { authMiddleware } from '../middleware/auth';
+import { asyncHandler } from '../middleware/error';
+import { createRateLimit } from '../middleware/rateLimit';
+import { validateDataSource, validateDataSourceUpdate, validateRequest } from '../middleware/validation';
 
-export const sourcesRouter = Router();
+const router = Router();
+const dataSourceController = new DataSourceController();
 
-/** GET /sources?search=&page=&pageSize=&sort=name|created_at|type&dir=asc|desc */
-sourcesRouter.get('/', async (req, res, next) => {
-  try {
-    const { page, pageSize, sort, dir, offset } = pageParams(
-      {
-        page: req.query.page,
-        pageSize: req.query.pageSize,
-        sort: req.query.sort,
-        dir: req.query.dir
-      },
-      ['name', 'created_at', 'type']
-    );
+// Helper to coerce mixed-type middlewares into Express' RequestHandler
+const asHandler = (h: any) => h as unknown as RequestHandler;
 
-    const params: any[] = [];
-    let where = 'WHERE 1=1';
+// 🔐 Auth on every route
+router.use(asHandler(authMiddleware));
 
-    if (req.query.search) {
-      params.push(`%${String(req.query.search)}%`);
-      where += ` AND (name ILIKE $${params.length} OR type ILIKE $${params.length})`;
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// Validation
+// ─────────────────────────────────────────────────────────────────────────────
+const paginationValidation = [
+  query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
+  query('type')
+    .optional()
+    .isIn([
+      'postgresql', 'mysql', 'mssql', 'oracle', 'mongodb', 'redis',
+      's3', 'azure-blob', 'gcs', 'snowflake', 'bigquery', 'redshift',
+      'databricks', 'api', 'file', 'kafka', 'elasticsearch',
+    ])
+    .withMessage('Invalid source type filter'),
+  query('status')
+    .optional()
+    .isIn(['pending', 'connected', 'disconnected', 'error', 'warning', 'syncing', 'testing'])
+    .withMessage('Invalid status filter'),
+];
 
-    const countSql = `SELECT COUNT(*)::int AS total FROM sources ${where}`;
-    const { rows: countRows } = await pool.query(countSql, params);
-    const total = countRows[0]?.total ?? 0;
+const idValidation = [param('id').isUUID().withMessage('Source ID must be a valid UUID')];
 
-    params.push(pageSize, offset);
-    const dataSql = `
-      SELECT id, name, type, created_at
-      FROM sources
-      ${where}
-      ORDER BY ${sort} ${dir}
-      LIMIT $${params.length-1} OFFSET $${params.length}
-    `;
-    const { rows } = await pool.query(dataSql, params);
-    res.json({ data: rows, total, page, pageSize });
-  } catch (e) { next(e); }
-});
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-route rate limiters (use the factory; don’t “call” a handler as a fn)
+// ─────────────────────────────────────────────────────────────────────────────
+const listSourcesLimit          = asHandler(createRateLimit({ windowMs: 60_000, max: 100 }));
+const healthLimit               = asHandler(createRateLimit({ windowMs: 60_000, max: 60 }));
+const getSourceLimit            = asHandler(createRateLimit({ windowMs: 60_000, max: 200 }));
+const schemaLimit               = asHandler(createRateLimit({ windowMs: 60_000, max: 30 }));
+const createSourceLimit         = asHandler(createRateLimit({ windowMs: 60_000, max: 20 }));
+const testLimit                 = asHandler(createRateLimit({ windowMs: 60_000, max: 10 }));
+const discoverSourceLimit       = asHandler(createRateLimit({ windowMs: 60_000, max: 5 }));
+const updateSourceLimit         = asHandler(createRateLimit({ windowMs: 60_000, max: 30 }));
+const updateStatusLimit         = asHandler(createRateLimit({ windowMs: 60_000, max: 20 }));
+const deleteSourceLimit         = asHandler(createRateLimit({ windowMs: 60_000, max: 10 }));
 
-/** GET /sources/:id */
-sourcesRouter.get('/:id', async (req, res, next) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, name, type, config, created_at FROM sources WHERE id = $1`,
-      [req.params.id]
-    );
-    if (!rows[0]) throw new HttpError(404, 'Source not found', 'NotFound');
-    res.json(rows[0]);
-  } catch (e) { next(e); }
-});
+// ─────────────────────────────────────────────────────────────────────────────
+// Routes – only methods that exist on DataSourceController
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** POST /sources */
-sourcesRouter.post('/', async (req, res, next) => {
-  try {
-    const Schema = z.object({
-      name: z.string().min(1),
-      type: z.string().min(1),
-      config: z.record(z.any()).optional()
-    });
-    const body = Schema.parse(req.body);
+/**
+ * @route GET /api/sources
+ * @desc Get all data sources with pagination & filters
+ */
+router.get(
+  '/',
+  paginationValidation,
+  validateRequest,
+  listSourcesLimit,
+  asyncHandler(dataSourceController.getAllDataSources),
+);
 
-    const { rows } = await pool.query(
-      `INSERT INTO sources (name, type, config)
-       VALUES ($1, $2, $3)
-       RETURNING id, name, type, created_at`,
-      [body.name, body.type, body.config ?? null]
-    );
-    res.status(201).json(rows[0]);
-  } catch (e) { next(e); }
-});
+/**
+ * @route GET /api/sources/health
+ * @desc Health summary of all data sources
+ */
+router.get(
+  '/health',
+  healthLimit,
+  asyncHandler(dataSourceController.getHealthSummary),
+);
+
+/**
+ * @route GET /api/sources/:id
+ * @desc Get a data source by ID
+ */
+router.get(
+  '/:id',
+  idValidation,
+  validateRequest,
+  getSourceLimit,
+  asyncHandler(dataSourceController.getDataSourceById),
+);
+
+/**
+ * @route GET /api/sources/:id/schema
+ * @desc Get schema for a data source
+ */
+router.get(
+  '/:id/schema',
+  idValidation,
+  validateRequest,
+  schemaLimit,
+  asyncHandler(dataSourceController.getDataSourceSchema),
+);
+
+/**
+ * @route POST /api/sources
+ * @desc Create a new data source
+ */
+router.post(
+  '/',
+  validateDataSource,
+  validateRequest,
+  createSourceLimit,
+  asyncHandler(dataSourceController.createDataSource),
+);
+
+/**
+ * @route POST /api/sources/:id/test
+ * @desc Test connection for an existing source
+ * (if you want a “test without creating” endpoint, add a controller method first)
+ */
+router.post(
+  '/:id/test',
+  idValidation,
+  validateRequest,
+  testLimit,
+  asyncHandler(dataSourceController.testConnection),
+);
+
+/**
+ * @route POST /api/sources/:id/discover
+ * @desc Trigger discovery/sync on a source
+ */
+router.post(
+  '/:id/discover',
+  idValidation,
+  [
+    body('force').optional().isBoolean().withMessage('Force must be a boolean'),
+  ],
+  validateRequest,
+  discoverSourceLimit,
+  asyncHandler(dataSourceController.syncDataSource),
+);
+
+/**
+ * @route PUT /api/sources/:id
+ * @desc Update a data source
+ */
+router.put(
+  '/:id',
+  validateDataSourceUpdate,
+  validateRequest,
+  updateSourceLimit,
+  asyncHandler(dataSourceController.updateDataSource),
+);
+
+/**
+ * @route PUT /api/sources/:id/status
+ * @desc Update status for a data source (reuses updateDataSource)
+ */
+router.put(
+  '/:id/status',
+  idValidation,
+  [
+    body('status')
+      .isIn(['pending', 'connected', 'disconnected', 'error', 'warning', 'syncing', 'testing'])
+      .withMessage('Invalid status'),
+    body('reason').optional().isString().isLength({ max: 500 }).withMessage('Reason must be less than 500 characters'),
+  ],
+  validateRequest,
+  updateStatusLimit,
+  asyncHandler(dataSourceController.updateDataSource),
+);
+
+/**
+ * @route DELETE /api/sources/:id
+ * @desc Delete a data source
+ */
+router.delete(
+  '/:id',
+  idValidation,
+  validateRequest,
+  deleteSourceLimit,
+  asyncHandler(dataSourceController.deleteDataSource),
+);
+
+export default router;

@@ -1,37 +1,13 @@
-# ---------- DEV STAGE ----------
 FROM node:20-alpine
 
-# System deps for better builds & file watching
-RUN apk add --no-cache bash git tini
-
 WORKDIR /app
-
-# Copy only manifests first to leverage layer caching
+RUN apk add --no-cache curl
 COPY package*.json ./
-COPY tsconfig.json ./
+RUN npm ci   # include devDependencies for nodemon/cross-env
+COPY . .
 
-# Install ALL deps (prod + dev) for dev workflow
-# Works with or without a lockfile
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+EXPOSE 3003
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:3003/health || exit 1
 
-# Ensure dev-time tools present (safety in case package.json changes)
-RUN npm i -D ts-node tsconfig-paths nodemon
-
-# Copy source last (so we can cache node_modules above)
-COPY src ./src
-
-# Environment
-ENV NODE_ENV=development \
-    PORT=8003 \
-    HOST=0.0.0.0 \
-    TS_NODE_TRANSPILE_ONLY=1
-
-# Expose port
-EXPOSE 8003
-
-# Nodemon config (runs ts-node with tsconfig-paths/register)
-# You can also move this into package.json scripts if you prefer.
-CMD ["tini", "--", "npx", "nodemon", \
-    "--watch", "src", \
-    "--ext", "ts,json", \
-    "--exec", "ts-node", "-r", "tsconfig-paths/register", "src/server.ts"]
+CMD ["npm","run","dev"]

@@ -1,0 +1,43 @@
+
+
+services:
+  gateway:
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      # In prod, your frontend origin(s) — change to your real domains
+      CORS_ORIGIN: https://app.example.com,https://admin.example.com
+      # (Optional) Disable DEV token in prod
+      DEV_BEARER: ""
+    ports:
+      - "8000:8000"   # Gateway is the only public entrypoint
+    restart: always
+    security_opt:
+      - "no-new-privileges:true"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  data-service:
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      # Example: managed DB address
+      # DATABASE_URL: ${DATABASE_URL}
+    ports: []         # remove dev's published port
+    expose:
+      - "3002"        # internal only; reachable by gateway
+    restart: always
+    security_opt:
+      - "no-new-privileges:true"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  db:
+    # In real prod you usually don't publish Postgres either;
+    # leave it internal or move to managed DB.
+    ports: []         # ensure not published by mistake
+
+  redis:
+    ports: []         # keep internal-only

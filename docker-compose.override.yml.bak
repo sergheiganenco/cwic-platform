@@ -1,0 +1,11 @@
+﻿services:
+  api-gateway:
+    environment:
+      NODE_ENV: development
+      JWT_SECRET: devsecret
+      # re-create DEV_BEARER after step 2
+      DEV_BEARER: "${DEV_BEARER}"
+  data-service:
+    environment:
+      NODE_ENV: development
+      JWT_SECRET: devsecret

@@ -1,13 +1,48 @@
 ﻿{
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "esModuleInterop": true,
-    "strict": true,
-    "resolveJsonModule": true,
+    /* Node 18+ friendly output */
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+
+    /* Project structure */
+    "rootDir": "src",
     "outDir": "dist",
-    "skipLibCheck": true
+
+    /* Build mode support (so `tsc --build` works) */
+    "composite": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+
+    /* Interop / JSON */
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+
+    /* Strictness & hygiene */
+    "strict": true,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+
+    /* Node types */
+    "types": ["node"],
+
+    /* Nice absolute imports like "@/utils/logger" */
+    "baseUrl": "src",
+    "paths": {
+      "@/*": ["*"]
+    },
+
+    /* Useful in dev; keep if you want stack traces mapped to TS */
+    "sourceMap": true
   },
-  "include": ["src"]
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
 }

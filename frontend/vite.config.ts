@@ -1,6 +1,8 @@
+// frontend/vite.config.ts (or .js)
 import react from '@vitejs/plugin-react'
 import path from 'path'
 import { defineConfig } from 'vite'
+
 
 export default defineConfig({
   plugins: [react()],
@@ -15,21 +17,19 @@ export default defineConfig({
       '@types': path.resolve(__dirname, './src/types'),
       '@store': path.resolve(__dirname, './src/store'),
       '@config': path.resolve(__dirname, './src/config'),
-      '@assets': path.resolve(__dirname, './src/assets')
-    }
+      '@assets': path.resolve(__dirname, './src/assets'),
+    },
   },
+  base: '/',                    // ensure assets resolve from the same origin
   server: {
+    host: 'localhost',
     port: 3000,
+    strictPort: true,
+    hmr: { clientPort: 3000 },  // avoid HMR trying another port
     proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '')
-      }
-    }
+      '/api': { target: 'http://localhost:8000', changeOrigin: true },
+    },
   },
-  build: {
-    outDir: 'dist',
-    sourcemap: true
-  }
+  preview: { port: 4173, strictPort: true },
+  build: { outDir: 'dist', sourcemap: true },
 })

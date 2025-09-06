@@ -1,83 +1,236 @@
-import { Router } from 'express';
-import { z } from 'zod';
-import { pool } from '../db.js';
-import { HttpError } from '../middleware/error.js';
-import { pageParams } from '../utils/pagination.js';
+// backend/data-service/src/routes/assets.ts
+import { Router, type RequestHandler } from 'express';
+import { body, param, query } from 'express-validator';
+import { AssetController } from '../controllers/AssetController';
+import { authMiddleware } from '../middleware/auth';
+import { asyncHandler } from '../middleware/error';
+import { createRateLimit } from '../middleware/rateLimit';
+import { validateRequest } from '../middleware/validation';
 
-export const assetsRouter = Router();
+const router = Router();
+const assetController = new AssetController();
 
-/** GET /assets?search=&page=&pageSize=&sort=name|created_at|owner&dir=asc|desc */
-assetsRouter.get('/', async (req, res, next) => {
-  try {
-    const { page, pageSize, sort, dir, offset } = pageParams(
-      {
-        page: req.query.page,
-        pageSize: req.query.pageSize,
-        sort: req.query.sort,
-        dir: req.query.dir
-      },
-      ['name', 'created_at', 'owner']
-    );
+// Apply authentication to all routes
+router.use(authMiddleware as unknown as RequestHandler);
 
-    const params: any[] = [];
-    let where = 'WHERE 1=1';
+// Validation schemas
+const createAssetValidation = [
+  body('name').isString().isLength({ min: 1, max: 255 }).withMessage('Name must be between 1 and 255 characters'),
+  body('type')
+    .isIn(['table', 'view', 'file', 'api_endpoint', 'stream', 'model'])
+    .withMessage('Invalid asset type'),
+  body('dataSourceId').isString().withMessage('Data source ID is required'),
+  body('path').isString().withMessage('Asset path is required'),
+  body('description').optional().isString().isLength({ max: 1000 }).withMessage('Description must be less than 1000 characters'),
+  body('metadata').optional().isObject().withMessage('Metadata must be an object'),
+  body('tags').optional().isArray().withMessage('Tags must be an array'),
+  body('classification')
+    .optional()
+    .isIn(['public', 'internal', 'confidential', 'restricted'])
+    .withMessage('Invalid classification level'),
+];
 
-    if (req.query.search) {
-      params.push(`%${String(req.query.search)}%`);
-      where += ` AND (name ILIKE $${params.length} OR description ILIKE $${params.length})`;
-    }
+const updateAssetValidation = [
+  param('id').isString().withMessage('Asset ID must be a string'),
+  body('name').optional().isString().isLength({ min: 1, max: 255 }).withMessage('Name must be between 1 and 255 characters'),
+  body('description').optional().isString().isLength({ max: 1000 }).withMessage('Description must be less than 1000 characters'),
+  body('metadata').optional().isObject().withMessage('Metadata must be an object'),
+  body('tags').optional().isArray().withMessage('Tags must be an array'),
+  body('classification')
+    .optional()
+    .isIn(['public', 'internal', 'confidential', 'restricted'])
+    .withMessage('Invalid classification level'),
+];
 
-    // total
-    const countSql = `SELECT COUNT(*)::int AS total FROM assets ${where}`;
-    const { rows: countRows } = await pool.query(countSql, params);
-    const total = countRows[0]?.total ?? 0;
+const paginationValidation = [
+  query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
+  query('type')
+    .optional()
+    .isIn(['table', 'view', 'file', 'api_endpoint', 'stream', 'model'])
+    .withMessage('Invalid asset type filter'),
+  query('dataSourceId').optional().isString().withMessage('Data source ID must be a string'),
+  query('classification')
+    .optional()
+    .isIn(['public', 'internal', 'confidential', 'restricted'])
+    .withMessage('Invalid classification filter'),
+  query('search').optional().isString().isLength({ min: 1, max: 100 }).withMessage('Search term must be between 1 and 100 characters'),
+];
 
-    // page
-    params.push(pageSize, offset);
-    const dataSql = `
-      SELECT id, name, owner, created_at
-      FROM assets
-      ${where}
-      ORDER BY ${sort} ${dir}
-      LIMIT $${params.length-1} OFFSET $${params.length}
-    `;
-    const { rows } = await pool.query(dataSql, params);
+const idValidation = [param('id').isString().withMessage('Asset ID must be a string')];
 
-    res.json({ data: rows, total, page, pageSize });
-  } catch (e) { next(e); }
-});
+// --- Rate limiters (cast to RequestHandler to avoid type incompatibilities) ---
+const asHandler = (h: any) => h as unknown as RequestHandler;
 
-/** GET /assets/:id */
-assetsRouter.get('/:id', async (req, res, next) => {
-  try {
-    const id = req.params.id;
-    const { rows } = await pool.query(
-      `SELECT id, name, owner, created_at, description, metadata
-         FROM assets WHERE id = $1`,
-      [id]
-    );
-    if (!rows[0]) throw new HttpError(404, 'Asset not found', 'NotFound');
-    res.json(rows[0]);
-  } catch (e) { next(e); }
-});
+const listAssetsLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 100 }));
+const searchAssetsLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 50 }));
+const getAssetStatsLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 30 }));
+const getAssetLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 200 }));
+const getSchemaLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 30 }));
+const getLineageLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 20 }));
+const getProfileLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 10 }));
+const createAssetLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 20 }));
+const scanAssetLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 5 }));
+const tagOperationsLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 30 }));
+const updateAssetLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 30 }));
+const updateClassificationLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 20 }));
+const deleteAssetLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 10 }));
 
-/** POST /assets */
-assetsRouter.post('/', async (req, res, next) => {
-  try {
-    const Schema = z.object({
-      name: z.string().min(1),
-      owner: z.string().min(1),
-      description: z.string().optional(),
-      metadata: z.record(z.any()).optional()
-    });
-    const body = Schema.parse(req.body);
+/**
+ * @route GET /api/assets
+ * @desc Get all assets with pagination, filtering, and search
+ * @access Private
+ */
+router.get('/', paginationValidation, validateRequest, listAssetsLimit, asyncHandler(assetController.getAllAssets));
 
-    const { rows } = await pool.query(
-      `INSERT INTO assets (name, owner, description, metadata)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, name, owner, created_at`,
-      [body.name, body.owner, body.description ?? null, body.metadata ?? null]
-    );
-    res.status(201).json(rows[0]);
-  } catch (e) { next(e); }
-});
+/**
+ * @route GET /api/assets/search
+ * @desc Search assets by name, description, or metadata
+ * @access Private
+ */
+router.get(
+  '/search',
+  [
+    query('q').isString().isLength({ min: 1, max: 100 }).withMessage('Search query must be between 1 and 100 characters'),
+    query('type')
+      .optional()
+      .isIn(['table', 'view', 'file', 'api_endpoint', 'stream', 'model'])
+      .withMessage('Invalid asset type filter'),
+    query('limit').optional().isInt({ min: 1, max: 50 }).withMessage('Limit must be between 1 and 50'),
+  ],
+  validateRequest,
+  searchAssetsLimit,
+  asyncHandler(assetController.searchAssets),
+);
+
+/**
+ * @route GET /api/assets/stats
+ * @desc Get asset statistics and overview (global)
+ * @access Private
+ */
+router.get('/stats', getAssetStatsLimit, asyncHandler(assetController.getAssetStats));
+
+/**
+ * @route GET /api/assets/:id
+ * @desc Get a specific asset by ID
+ * @access Private
+ */
+router.get('/:id', idValidation, validateRequest, getAssetLimit, asyncHandler(assetController.getAssetById));
+
+/**
+ * @route GET /api/assets/:id/schema
+ * @desc Get schema information for an asset
+ * @access Private
+ */
+router.get('/:id/schema', idValidation, validateRequest, getSchemaLimit, asyncHandler(assetController.getAssetSchema));
+
+/**
+ * @route GET /api/assets/:id/lineage
+ * @desc Get data lineage for an asset
+ * @access Private
+ */
+router.get('/:id/lineage', idValidation, validateRequest, getLineageLimit, asyncHandler(assetController.getAssetLineage));
+
+/**
+ * @route GET /api/assets/:id/profile
+ * @desc Get data profile for an asset
+ * @access Private
+ */
+router.get('/:id/profile', idValidation, validateRequest, getProfileLimit, asyncHandler(assetController.getAssetProfile));
+
+/**
+ * @route GET /api/assets/:id/stats
+ * @desc Get usage statistics for a specific asset
+ * @access Private
+ */
+router.get('/:id/stats', idValidation, validateRequest, getAssetStatsLimit, asyncHandler(assetController.getAssetStats));
+
+/**
+ * @route POST /api/assets
+ * @desc Create a new asset
+ * @access Private
+ */
+router.post('/', createAssetValidation, validateRequest, createAssetLimit, asyncHandler(assetController.createAsset));
+
+/**
+ * @route POST /api/assets/:id/scan
+ * @desc Trigger a scan/discovery for an asset
+ * @access Private
+ */
+router.post(
+  '/:id/scan',
+  idValidation,
+  [
+    body('type').optional().isIn(['full', 'incremental', 'schema_only', 'profile_only']).withMessage('Invalid scan type'),
+    body('force').optional().isBoolean().withMessage('Force must be a boolean'),
+  ],
+  validateRequest,
+  scanAssetLimit,
+  asyncHandler(assetController.scanAsset),
+);
+
+/**
+ * @route POST /api/assets/:id/tags
+ * @desc Add tags to an asset
+ * @access Private
+ */
+router.post(
+  '/:id/tags',
+  idValidation,
+  [
+    body('tags').isArray({ min: 1 }).withMessage('Tags must be a non-empty array'),
+    body('tags.*').isString().isLength({ min: 1, max: 50 }).withMessage('Each tag must be between 1 and 50 characters'),
+  ],
+  validateRequest,
+  tagOperationsLimit,
+  asyncHandler(assetController.addTags),
+);
+
+/**
+ * @route PUT /api/assets/:id
+ * @desc Update an asset
+ * @access Private
+ */
+router.put('/:id', updateAssetValidation, validateRequest, updateAssetLimit, asyncHandler(assetController.updateAsset));
+
+/**
+ * @route PUT /api/assets/:id/classification
+ * @desc Update asset classification
+ * @access Private
+ */
+router.put(
+  '/:id/classification',
+  idValidation,
+  [
+    body('classification')
+      .isIn(['public', 'internal', 'confidential', 'restricted'])
+      .withMessage('Invalid classification level'),
+    body('reason').optional().isString().isLength({ max: 500 }).withMessage('Reason must be less than 500 characters'),
+  ],
+  validateRequest,
+  updateClassificationLimit,
+  asyncHandler(assetController.updateClassification),
+);
+
+/**
+ * @route DELETE /api/assets/:id
+ * @desc Delete an asset (soft delete)
+ * @access Private
+ */
+router.delete('/:id', idValidation, validateRequest, deleteAssetLimit, asyncHandler(assetController.deleteAsset));
+
+/**
+ * @route DELETE /api/assets/:id/tags
+ * @desc Remove tags from an asset
+ * @access Private
+ */
+router.delete(
+  '/:id/tags',
+  idValidation,
+  [body('tags').isArray({ min: 1 }).withMessage('Tags must be a non-empty array'), body('tags.*').isString().withMessage('Each tag must be a string')],
+  validateRequest,
+  tagOperationsLimit,
+  asyncHandler(assetController.removeTags),
+);
+
+export default router;

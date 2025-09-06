@@ -1,0 +1,9 @@
+node_modules
+dist
+.tmp
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+coverage
+# DO NOT ignore package-lock.json

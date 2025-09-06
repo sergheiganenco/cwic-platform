@@ -1,4 +1,4 @@
-﻿version: "3.8"
+﻿name: cwic-platform
 
 services:
   # ---------- FRONTEND ----------
@@ -13,46 +13,52 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000
+      VITE_API_URL: http://localhost:8000
     depends_on:
-      - api-gateway
-    networks:
-      - cwic-network
-    restart: unless-stopped
-
-  # ---------- API GATEWAY ----------
-  api-gateway:
-    build:
-      context: ./backend/api-gateway
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - NODE_ENV=production
-      - PORT=8000
-      - JWT_SECRET=${JWT_SECRET}
-      - AUTH_SERVICE_URL=http://auth-service:8001
-      - DATA_SERVICE_URL=http://data-service:3002
-      - AI_SERVICE_URL=http://ai-service:3003
-      - INTEGRATION_SERVICE_URL=http://integration-service:3006
-      - NOTIFICATION_SERVICE_URL=http://notification-service:3005
-      - PIPELINE_SERVICE_URL=http://pipeline-service:3004
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      auth-service:
-        condition: service_started
-      data-service:
+      api-gateway:
         condition: service_started
     networks:
       - cwic-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:5173/',r=>{process.exit(r.statusCode>=200 && r.statusCode<500?0:1)}).on('error',()=>process.exit(1))\""
+        ]
       interval: 30s
       timeout: 10s
+      retries: 3
+
+  # ---------- API GATEWAY ----------
+  api-gateway:
+    build:
+      context: ./backend/api-gateway
+      dockerfile: Dockerfile.dev
+    ports: ["8000:8000"]
+    environment:
+      NODE_ENV: development
+      PORT: 8000
+      DATA_SERVICE_URL: http://data-service:3002
+      AI_SERVICE_URL: http://ai-service:3003
+      AUTH_SERVICE_URL: http://auth-service:8001
+      CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+      DEV_BEARER: ${DEV_BEARER}
+      NO_PROXY: "localhost,127.0.0.1,api-gateway,data-service,ai-service,auth-service,pipeline-service,notification-service,integration-service,db,redis"
+      no_proxy: "localhost,127.0.0.1,api-gateway,data-service,ai-service,auth-service,pipeline-service,notification-service,integration-service,db,redis"
+    volumes:
+      - ./backend/api-gateway:/app
+      - /app/node_modules
+    depends_on:
+      data-service:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8000/health',r=>{process.exit(r.statusCode===200?0:1)})"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
       retries: 3
 
   # ---------- AUTH SERVICE ----------
@@ -63,12 +69,13 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - NODE_ENV=production
-      - PORT=8001
-      - DATABASE_URL=postgresql://${DB_USER:-cwic_user}:${DB_PASSWORD:-cwic_secure_pass}@db:5432/${DB_NAME:-cwic_platform}
-      - REDIS_URL=redis://redis:6379/0
-      - JWT_SECRET=${JWT_SECRET}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8001
+      DATABASE_URL: postgresql://${DB_USER:-cwic_user}:${DB_PASSWORD:-cwic_secure_pass}@db:5432/${DB_NAME:-cwic_platform}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: devsecret
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -78,7 +85,11 @@ services:
       - cwic-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:8001/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -88,25 +99,27 @@ services:
     build:
       context: ./backend/data-service
       dockerfile: Dockerfile.dev
+    ports: ["3002:3002"]
     environment:
-      - PORT=3002
-      - CORS_ORIGIN=http://localhost:5173
-      - DATABASE_URL=postgresql://${DB_USER:-cwic_user}:${DB_PASSWORD:-cwic_secure_pass}@db:5432/${DB_NAME:-cwic_platform}
-    ports:
-      - "3002:3002"
+      NODE_ENV: development
+      SKIP_AUTH: "true"
+      JWT_SECRET: devsecret
+      PORT: 3002
+      HOST: 0.0.0.0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://cwic_user:cwic_secure_pass@db:5432/cwic_platform}
+      ENABLE_FILE_LOGGING: "false"    # avoid FS writes during dev
+      CORS_ORIGIN: http://localhost:5173,http://localhost:3000
     volumes:
       - ./backend/data-service:/app
       - /app/node_modules
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - cwic-network
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3002/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
       retries: 3
 
   # ---------- AI SERVICE ----------
@@ -114,21 +127,19 @@ services:
     build:
       context: ./backend/ai-service
       dockerfile: Dockerfile.dev
+    ports: ["3003:3003"]
     environment:
-      - PORT=3003
-      - CORS_ORIGIN=http://localhost:5173
-    ports:
-      - "3003:3003"
+      NODE_ENV: development
+      PORT: 3003
+      HOST: 0.0.0.0
     volumes:
       - ./backend/ai-service:/app
       - /app/node_modules
-    networks:
-      - cwic-network
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3003/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
       retries: 3
 
   # ---------- PIPELINE SERVICE ----------
@@ -136,9 +147,12 @@ services:
     build:
       context: ./backend/pipeline-service
       dockerfile: Dockerfile.dev
+    command: ["npm","run","dev"]
     environment:
-      - PORT=3004
-      - CORS_ORIGIN=http://localhost:5173
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3004
+      CORS_ORIGIN: http://localhost:5173,http://localhost:3000
     ports:
       - "3004:3004"
     volumes:
@@ -148,7 +162,11 @@ services:
       - cwic-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3004/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3004/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -158,9 +176,12 @@ services:
     build:
       context: ./backend/notification-service
       dockerfile: Dockerfile.dev
+    command: ["npm","run","dev"]
     environment:
-      - PORT=3005
-      - CORS_ORIGIN=http://localhost:5173
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3005
+      CORS_ORIGIN: http://localhost:5173,http://localhost:3000
     ports:
       - "3005:3005"
     volumes:
@@ -170,7 +191,11 @@ services:
       - cwic-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3005/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -180,9 +205,12 @@ services:
     build:
       context: ./backend/integration-service
       dockerfile: Dockerfile.dev
+    command: ["npm","run","dev"]
     environment:
-      - PORT=3006
-      - CORS_ORIGIN=http://localhost:5173
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3006
+      CORS_ORIGIN: http://localhost:5173,http://localhost:3000
     ports:
       - "3006:3006"
     volumes:
@@ -192,7 +220,11 @@ services:
       - cwic-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3006/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3006/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -200,7 +232,6 @@ services:
   # ---------- POSTGRES ----------
   db:
     image: postgres:15
-    container_name: cwic-db
     ports:
       - "${DB_PORT:-5432}:5432"
     environment:
@@ -210,7 +241,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cwic_user} -d ${DB_NAME:-cwic_platform}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cwic_user} -d ${DB_NAME:-cwic_platform} -h localhost || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -221,7 +252,6 @@ services:
   # ---------- REDIS ----------
   redis:
     image: redis:7-alpine
-    container_name: cwic-redis
     ports:
       - "6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
@@ -236,8 +266,36 @@ services:
       - cwic-network
     restart: unless-stopped
 
+  # ---------- OPTIONAL: ELASTICSEARCH ----------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    profiles: ["search"]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    networks:
+      - cwic-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
 networks:
   cwic-network:
+    driver: bridge
 
 volumes:
   pgdata:
