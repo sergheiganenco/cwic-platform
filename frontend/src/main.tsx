@@ -8,6 +8,7 @@ import { Provider } from 'react-redux'
 import ErrorBoundary from '@/components/common/ErrorBoundary'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
 import { ToastProvider, Toaster } from '@/components/ui/Notification'
+import { http } from '@/services/http'
 import { AuthProvider } from '@hooks/useAuth'
 import AppRouter from './routes/router'
 import { store } from './store/store'
@@ -15,14 +16,19 @@ import { store } from './store/store'
 import '@/styles/globals.css'
 import '@/styles/tailwind.css'
 
-// ✅ DEV auth bootstrap: stash a token so Axios sends Authorization
-if (import.meta.env.DEV && !localStorage.getItem('authToken')) {
+// ✅ DEV auth bootstrap: stash a token so Axios can send Authorization
+if (import.meta.env.DEV) {
   const devJwt = import.meta.env.VITE_DEV_JWT as string | undefined
-  if (devJwt) {
+  const hasToken =
+    !!localStorage.getItem('authToken') || !!sessionStorage.getItem('authToken')
+  if (devJwt && !hasToken) {
     localStorage.setItem('authToken', devJwt)
     sessionStorage.setItem('authToken', devJwt)
   }
 }
+
+// Debug: confirm what baseURL the http client resolved to
+console.log('[HTTP] baseURL =', http.defaults.baseURL)
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -51,7 +57,6 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
               }
             >
               <AuthProvider>
-                {/* ⬇️ Router with v7 future flags */}
                 <AppRouter />
               </AuthProvider>
             </React.Suspense>

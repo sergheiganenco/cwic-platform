@@ -74,10 +74,11 @@ export interface AIDiscoverySession {
 export interface AIServiceConfig {
   baseURL: string;
   timeout: number;
-  maxRetries: number;    // retry attempts for transient errors
-  retryDelay: number;    // base delay in ms
+  maxRetries: number;
+  retryDelay: number;
   enableMockMode: boolean;
-  cacheDuration: number; // ms
+  cacheDuration: number;
+  enableLogging: boolean;
 }
 
 export interface RequestContext {
@@ -94,11 +95,11 @@ interface ConnectionMetrics {
   failedRequests: number;
   averageResponseTime: number;
   lastError?: string;
-  uptime: number; // stored as start-time internally; getter returns elapsed
+  uptime: number;
 }
 
 /* =========================
-   Errors (TS1294-safe)
+   Errors
    ========================= */
 class AIServiceError extends Error {
   public code: string;
@@ -113,16 +114,19 @@ class AIServiceError extends Error {
     this.details = details;
   }
 }
+
 class NetworkError extends AIServiceError {
   constructor(message: string = 'Network connection failed') {
     super('NETWORK_ERROR', message, true);
   }
 }
+
 class TimeoutError extends AIServiceError {
   constructor(message: string = 'Request timed out') {
     super('TIMEOUT_ERROR', message, true);
   }
 }
+
 class AuthenticationError extends AIServiceError {
   constructor(message: string = 'Authentication failed') {
     super('AUTH_ERROR', message, false);
@@ -130,22 +134,73 @@ class AuthenticationError extends AIServiceError {
 }
 
 /* =========================
-   Helpers (no module augmentation)
+   Configuration
    ========================= */
-type Meta = { requestId: string; startTime: number };
-const requestMeta = new WeakMap<AxiosRequestConfig, Meta>();
+const DEFAULT_CONFIG: AIServiceConfig = {
+  baseURL: '/api/ai',
+  timeout: 30000,
+  maxRetries: 3,
+  retryDelay: 1000,
+  enableMockMode: false,
+  cacheDuration: 300000,
+  enableLogging: false,
+};
 
+const HEALTH_PATH = '/health';
+const CONNECTION_CHECK_INTERVAL = 30000;
+const MAX_CACHE_SIZE = 100;
+
+/* =========================
+   Utilities
+   ========================= */
+const isProduction = import.meta.env.PROD;
+const isDevelopment = import.meta.env.DEV;
 const isBrowser = typeof window !== 'undefined';
-// Your backend exposes GET /api/status (baseURL already includes /api)
-const HEALTH_PATH = '/status';
+
+function generateRequestId(): string {
+  if (isBrowser && crypto && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `req_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+}
+
+function sanitizeHeaders(headers: any): any {
+  if (!headers) return {};
+  const sanitized = { ...headers };
+  if (sanitized.Authorization) sanitized.Authorization = 'Bearer [REDACTED]';
+  if (sanitized.authorization) sanitized.authorization = 'Bearer [REDACTED]';
+  return sanitized;
+}
+
+function getAuthToken(): string | null {
+  if (!isBrowser) return null;
+  try {
+    return localStorage.getItem('authToken') || 
+           sessionStorage.getItem('authToken') || 
+           localStorage.getItem('access_token') ||
+           sessionStorage.getItem('access_token') ||
+           null;
+  } catch {
+    return null;
+  }
+}
+
+function getUserContext(): any {
+  if (!isBrowser) return null;
+  try {
+    const userStr = localStorage.getItem('user') || sessionStorage.getItem('user');
+    return userStr ? JSON.parse(userStr) : null;
+  } catch {
+    return null;
+  }
+}
 
 /* =========================
    Service
    ========================= */
 class AIAssistantService {
-  // Avoid AxiosInstance type to prevent duplicate identifier errors
   private readonly api: ReturnType<typeof axios.create>;
-  private config: AIServiceConfig;
+  private readonly config: AIServiceConfig;
 
   private connected = false;
   private connectionAttempts = 0;
@@ -159,164 +214,219 @@ class AIAssistantService {
     uptime: Date.now(),
   };
 
-  private responseCache = new Map<string, { response: AIResponse; timestamp: number }>();
-  private activeRequests = new Map<string, AbortController>();
+  private readonly responseCache = new Map<string, { response: AIResponse; timestamp: number }>();
+  private readonly activeRequests = new Map<string, AbortController>();
+  private readonly requestMeta = new WeakMap<AxiosRequestConfig, { requestId: string; startTime: number }>();
+
   private cleanupTimer?: ReturnType<typeof setInterval>;
 
-  private readonly CONNECTION_CHECK_INTERVAL = 30_000; // 30s
-  private readonly MAX_CACHE_SIZE = 100;
-
   constructor(config?: Partial<AIServiceConfig>) {
-    const baseFromEnv =
-      (import.meta as any).env?.VITE_AI_SERVICE_URL ||
-      (import.meta as any).env?.VITE_API_BASE ||
-      'http://localhost:8003/api';
-
+    // Resolve base URL with production-safe defaults
+    const baseURL = this.resolveBaseURL(config?.baseURL);
+    
     this.config = {
-      baseURL: baseFromEnv,
-      timeout: 30_000,
-      maxRetries: 3,
-      retryDelay: 1_000,
-      enableMockMode: (import.meta as any).env?.VITE_ENABLE_MOCK_MODE !== 'false',
-      cacheDuration: 300_000, // 5 minutes
+      ...DEFAULT_CONFIG,
+      baseURL,
+      enableMockMode: this.shouldEnableMockMode(config?.enableMockMode),
+      enableLogging: this.shouldEnableLogging(config?.enableLogging),
       ...config,
     };
 
     this.api = this.createAxiosInstance();
+    
+    // Initialize connection check and cleanup
     void this.checkConnection();
     this.startPeriodicCleanup();
   }
 
-  /* ---------- axios ---------- */
+  private resolveBaseURL(configURL?: string): string {
+    if (configURL) return configURL;
+
+    // Check environment variables
+    const envURL = import.meta.env?.VITE_AI_SERVICE_URL || 
+                   import.meta.env?.VITE_AI_API_URL ||
+                   import.meta.env?.VITE_API_BASE;
+
+    if (envURL) {
+      // Ensure it's a proper URL for production
+      if (isProduction && !envURL.startsWith('http')) {
+        console.warn('[AI Service] Production environment detected but relative URL provided. This may cause issues.');
+      }
+      return envURL;
+    }
+
+    // Development fallback
+    return isDevelopment ? '/api/ai' : '/api/ai';
+  }
+
+  private shouldEnableMockMode(configValue?: boolean): boolean {
+    if (configValue !== undefined) return configValue;
+    
+    // Only enable mock mode in development and when explicitly enabled
+    return isDevelopment && import.meta.env?.VITE_ENABLE_MOCK_MODE !== 'false';
+  }
+
+  private shouldEnableLogging(configValue?: boolean): boolean {
+    if (configValue !== undefined) return configValue;
+    
+    // Enable logging in development or when explicitly enabled
+    return isDevelopment || import.meta.env?.VITE_DEBUG_AI_SERVICE === 'true';
+  }
+
   private createAxiosInstance(): ReturnType<typeof axios.create> {
     const instance = axios.create({
       baseURL: this.config.baseURL,
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'X-Client-Version': (import.meta as any).env?.VITE_APP_VERSION || '1.0.0',
+        'Accept': 'application/json',
+        'X-Client-Version': import.meta.env?.VITE_APP_VERSION || '1.0.0',
         'X-Client-Type': 'web',
         'X-Platform': 'cwic-frontend',
       },
     });
 
-    // Request interceptor
+    this.setupRequestInterceptor(instance);
+    this.setupResponseInterceptor(instance);
+
+    return instance;
+  }
+
+  private setupRequestInterceptor(instance: ReturnType<typeof axios.create>): void {
     instance.interceptors.request.use(
       (config) => {
-        const token = this.getAuthToken();
-        if (token) (config.headers as any).Authorization = `Bearer ${token}`;
+        if (!config) {
+          throw new AIServiceError('REQUEST_CONFIG_ERROR', 'Invalid request configuration');
+        }
 
-        const requestId = this.generateRequestId();
-        (config.headers as any)['X-Request-ID'] = requestId;
-        requestMeta.set(config, { requestId, startTime: Date.now() });
+        // Generate request ID and store metadata
+        const requestId = generateRequestId();
+        const startTime = Date.now();
+        
+        config.headers = config.headers || {};
+        config.headers['X-Request-ID'] = requestId;
+        
+        this.requestMeta.set(config, { requestId, startTime });
 
-        const userContext = this.getUserContext();
-        if (userContext) (config.headers as any)['X-User-Context'] = JSON.stringify(userContext);
+        // Add authentication if available (but not for gateway requests in dev)
+        const isGatewayRequest = this.config.baseURL.startsWith('/api/');
+        if (!isGatewayRequest || isProduction) {
+          const token = getAuthToken();
+          if (token) {
+            config.headers.Authorization = `Bearer ${token}`;
+          }
+        }
+
+        // Add user context
+        const userContext = getUserContext();
+        if (userContext) {
+          config.headers['X-User-Context'] = JSON.stringify(userContext);
+        }
 
         this.metrics.totalRequests++;
 
-        if (import.meta.env.DEV) {
-          console.log(`🔄 AI API Request: ${config.method?.toUpperCase()} ${config.url}`, {
+        if (this.config.enableLogging) {
+          console.log(`[AI Service] ${config.method?.toUpperCase()} ${config.url}`, {
             requestId,
-            headers: this.sanitizeHeaders(config.headers),
-            data: config.data,
+            headers: sanitizeHeaders(config.headers),
+            baseURL: this.config.baseURL,
           });
         }
+
         return config;
       },
       (error: AxiosError) => {
         this.metrics.failedRequests++;
-        console.error('❌ Request interceptor error:', error);
+        console.error('[AI Service] Request interceptor error:', error.message);
         return Promise.reject(new AIServiceError('REQUEST_SETUP_ERROR', error.message, false, error));
       }
     );
+  }
 
-    // Response interceptor
+  private setupResponseInterceptor(instance: ReturnType<typeof axios.create>): void {
     instance.interceptors.response.use(
       (response: AxiosResponse) => {
-        const meta = requestMeta.get(response.config);
+        const meta = this.requestMeta.get(response.config);
         const processingTime = meta ? Date.now() - meta.startTime : 0;
 
         this.metrics.successfulRequests++;
         this.updateAverageResponseTime(processingTime);
 
-        if (import.meta.env.DEV) {
-          console.log(`✅ AI API Response: ${response.config.method?.toUpperCase()} ${response.config.url}`, {
-            status: response.status,
+        if (this.config.enableLogging) {
+          console.log(`[AI Service] ${response.status} ${response.config.method?.toUpperCase()} ${response.config.url}`, {
             processingTime: `${processingTime}ms`,
             requestId: meta?.requestId,
-            data: response.data,
           });
         }
+
         return response;
       },
       (error: AxiosError) => {
-        const meta = error.config ? requestMeta.get(error.config) : undefined;
+        const meta = error.config ? this.requestMeta.get(error.config) : undefined;
         const processingTime = meta ? Date.now() - meta.startTime : 0;
 
         this.metrics.failedRequests++;
         this.metrics.lastError = error.message;
 
-        console.error('❌ AI Service API Error:', {
-          message: error.message,
-          status: error.response?.status,
-          processingTime: `${processingTime}ms`,
-          requestId: meta?.requestId,
-          data: error.response?.data,
-          config: { method: error.config?.method, url: error.config?.url },
-        });
+        if (this.config.enableLogging) {
+          console.error('[AI Service] Request failed:', {
+            message: error.message,
+            status: error.response?.status,
+            processingTime: `${processingTime}ms`,
+            requestId: meta?.requestId,
+            url: error.config?.url,
+          });
+        }
 
         this.handleSpecificErrors(error);
         return Promise.reject(this.createEnhancedError(error));
       }
     );
-
-    return instance;
   }
 
-  /* ---------- connection ---------- */
   private async checkConnection(): Promise<void> {
     const now = Date.now();
-    if (now - this.lastConnectionCheck < this.CONNECTION_CHECK_INTERVAL) return;
+    if (now - this.lastConnectionCheck < CONNECTION_CHECK_INTERVAL) return;
+    
     this.lastConnectionCheck = now;
 
     try {
       await this.requestWithRetry(
-        () => this.api.get(HEALTH_PATH, { timeout: 5_000, headers: { 'X-Health-Check': 'true' } }),
+        () => this.api.get(HEALTH_PATH, { 
+          timeout: 5000,
+          headers: { 'X-Health-Check': 'true' }
+        }),
         { skipRetry: true }
       );
 
       this.connected = true;
       this.connectionAttempts = 0;
-      if (import.meta.env.DEV) console.log('✅ AI Service connected successfully');
+      
+      if (this.config.enableLogging) {
+        console.log('[AI Service] Connection check successful');
+      }
     } catch (error) {
       this.connected = false;
       this.connectionAttempts++;
-      if (import.meta.env.DEV) console.log(`❌ AI Service not available (attempt ${this.connectionAttempts})`, error);
+      
+      if (this.config.enableLogging) {
+        console.warn(`[AI Service] Connection check failed (attempt ${this.connectionAttempts}):`, (error as Error).message);
+      }
     }
   }
 
-  public isConnected(): boolean {
-    return this.connected;
-  }
-  public getConnectionStatus(): 'connected' | 'disconnected' | 'connecting' {
-    if (this.connectionAttempts > 0 && !this.connected) return 'connecting';
-    return this.connected ? 'connected' : 'disconnected';
-  }
-
-  /* ---------- retry helper ---------- */
   private async requestWithRetry<T>(
-    fn: () => Promise<T>,
-    opts: { skipRetry?: boolean } = {}
+    fn: () => Promise<T>, 
+    options: { skipRetry?: boolean } = {}
   ): Promise<T> {
-    if (opts.skipRetry) return fn();
+    if (options.skipRetry) return fn();
 
-    const max = this.config.maxRetries;
-    const base = this.config.retryDelay;
+    const maxRetries = this.config.maxRetries;
+    const baseDelay = this.config.retryDelay;
 
     let lastError: unknown;
-    for (let attempt = 0; attempt <= max; attempt++) {
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         return await fn();
       } catch (err) {
@@ -324,45 +434,45 @@ class AIAssistantService {
         const status = error.response?.status;
         const code = (error as any).code;
 
-        const isAuth = status === 401 || status === 403;
-        const isValidation = status === 422;
-        const isTimeout = code === 'ECONNABORTED';
-        const isNetwork = code === 'ERR_NETWORK' || code === 'NETWORK_ERROR';
-        const retryableStatus = !status || status >= 500 || status === 429;
-
-        if (attempt === max || isAuth || isValidation || (!retryableStatus && !isTimeout && !isNetwork)) {
+        // Don't retry on certain errors
+        const isAuthError = status === 401 || status === 403;
+        const isValidationError = status === 422;
+        const isClientError = status && status >= 400 && status < 500 && !isAuthError;
+        
+        if (attempt === maxRetries || isAuthError || isValidationError || isClientError) {
           lastError = error;
           break;
         }
 
+        // Calculate exponential backoff with jitter
         const jitter = Math.floor(Math.random() * 250);
-        const wait = base * Math.pow(2, attempt) + jitter;
-        if (import.meta.env.DEV) console.warn(`🔁 Retry ${attempt + 1}/${max} in ${wait}ms`);
-        await new Promise((r) => setTimeout(r, wait));
+        const delay = baseDelay * Math.pow(2, attempt) + jitter;
+        
+        if (this.config.enableLogging) {
+          console.warn(`[AI Service] Retrying request (${attempt + 1}/${maxRetries}) in ${delay}ms`);
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
+    
     throw lastError;
   }
 
-  /* ---------- periodic cleanup ---------- */
   private startPeriodicCleanup(): void {
-    this.stopPeriodicCleanup(); // avoid double timers
+    this.stopPeriodicCleanup();
 
-    // run immediately once
-    this.cleanupCache();
-    this.cleanupActiveRequests();
-
-    // then every 5 minutes
     this.cleanupTimer = setInterval(() => {
       try {
         this.cleanupCache();
         this.cleanupActiveRequests();
       } catch (err) {
-        if (import.meta.env.DEV) console.warn('Periodic cleanup error:', err);
+        if (this.config.enableLogging) {
+          console.warn('[AI Service] Periodic cleanup error:', err);
+        }
       }
-    }, 300_000);
+    }, 300000); // 5 minutes
 
-    // optional: stop on unload
     if (isBrowser) {
       window.addEventListener('beforeunload', () => this.stopPeriodicCleanup(), { once: true });
     }
@@ -377,270 +487,68 @@ class AIAssistantService {
 
   private cleanupCache(): void {
     const now = Date.now();
+    const expired: string[] = [];
+
     for (const [key, { timestamp }] of this.responseCache) {
-      if (now - timestamp > this.config.cacheDuration) this.responseCache.delete(key);
+      if (now - timestamp > this.config.cacheDuration) {
+        expired.push(key);
+      }
     }
-    if (this.responseCache.size > this.MAX_CACHE_SIZE) {
-      const sorted = [...this.responseCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
-      const excess = this.responseCache.size - this.MAX_CACHE_SIZE;
-      for (let i = 0; i < excess; i++) this.responseCache.delete(sorted[i][0]);
+
+    expired.forEach(key => this.responseCache.delete(key));
+
+    // Remove excess entries
+    if (this.responseCache.size > MAX_CACHE_SIZE) {
+      const entries = [...this.responseCache.entries()]
+        .sort((a, b) => a[1].timestamp - b[1].timestamp);
+      
+      const excess = this.responseCache.size - MAX_CACHE_SIZE;
+      for (let i = 0; i < excess; i++) {
+        this.responseCache.delete(entries[i][0]);
+      }
     }
   }
 
   private cleanupActiveRequests(): void {
-    for (const [id, ctrl] of this.activeRequests) {
-      if (ctrl.signal.aborted) this.activeRequests.delete(id);
+    for (const [id, controller] of this.activeRequests) {
+      if (controller.signal.aborted) {
+        this.activeRequests.delete(id);
+      }
     }
   }
 
-  /* ---------- normalizer ---------- */
-  private normalizeBackendData(raw: any, userPrompt?: string): AIResponse['data'] {
-    if (!raw) {
-      return { message: 'Empty response from AI service.', type: 'text' };
-    }
-
-    // If backend already returns your unified shape, pass it through
-    if (raw.type && raw.message) return raw as AIResponse['data'];
-
-    // Natural-language → SQL result (AIService.QueryResult)
-    if (raw.sql && raw.explanation) {
-      return {
-        message: "Here’s the SQL I generated.",
-        type: 'query',
-        results: {
-          sql: raw.sql,
-          explanation: raw.explanation,
-          tables: raw.tables,
-          fields: raw.fields,
-          confidence: raw.confidence,
-          warnings: raw.warnings,
-          isAiGenerated: raw.isAiGenerated,
-        },
-        suggestions: [
-          'Add a date range filter',
-          'Group results by day',
-          'Limit to the last 1,000 rows',
-          'Explain this query step-by-step',
-        ],
-        actions: [{ type: 'view_details', label: 'Copy SQL', payload: { sql: raw.sql, prompt: userPrompt } }],
-      };
-    }
-
-    // Data sample / quality analysis shape (AnalysisService.analyzeDataSample)
-    if (raw.analysis && raw.qualityIssues) {
-      return {
-        message: "Here’s your data quality analysis.",
-        type: 'analysis',
-        results: {
-          analysis: raw.analysis,
-          qualityIssues: raw.qualityIssues,
-          recommendations: raw.recommendations ?? [],
-          summary: raw.summary,
-          analysisMetadata: raw.analysisMetadata,
-        },
-        suggestions: [
-          'Generate quality rules',
-          'Create a remediation plan',
-          'Schedule a weekly quality check',
-        ],
-        actions: [{ type: 'create_rule', label: 'Create Quality Rules', payload: { issues: raw.qualityIssues } }],
-      };
-    }
-
-    // Field discovery (AIService.discoverFields / DiscoveryService)
-    if (raw.fields && raw.recommendations) {
-      return {
-        message: 'Field discovery results are ready.',
-        type: 'data',
-        results: raw,
-        suggestions: [
-          'Generate quality rules for PII',
-          'Export a discovery report',
-          'Open governance recommendations',
-        ],
-        actions: [{ type: 'export_data', label: 'Export Report', payload: { format: 'json', data: raw } }],
-      };
-    }
-
-    // Quality rules generation
-    if (Array.isArray(raw.rules)) {
-      return {
-        message: 'Proposed quality rules generated.',
-        type: 'data',
-        results: raw.rules,
-        actions: [{ type: 'create_rule', label: 'Apply Rules', description: 'Create and enable these rules' }],
-      };
-    }
-
-    // Generic fallback: stringify unknown objects or pass through strings
-    if (typeof raw === 'string') return { message: raw, type: 'text' };
-    try {
-      return { message: 'Result:', type: 'data', results: raw };
-    } catch {
-      return { message: 'Received an unrecognized response.', type: 'text' };
-    }
-  }
-
-  /* ---------- public API ---------- */
-  public async sendMessage(message: string, context?: RequestContext): Promise<AIResponse> {
-    const requestId = context?.requestId || this.generateRequestId();
-
-    // cache
-    if (context?.cacheKey) {
-      const cached = this.getCachedResponse(context.cacheKey);
-      if (cached) return cached;
-    }
-
-    await this.checkConnection();
-
-    try {
-      const abortController = new AbortController();
-      this.activeRequests.set(requestId, abortController);
-
-      const t0 = performance.now?.() ?? Date.now();
-
-      const res = await this.requestWithRetry(() =>
-        this.api.post(
-          '/discovery/query',
-          {
-            query: message,
-            context: {
-              timestamp: new Date().toISOString(),
-              clientType: 'web',
-              userAgent: isBrowser ? navigator.userAgent : 'node',
-              ...context,
-            },
-          },
-          {
-            timeout: context?.timeout || this.config.timeout,
-            signal: abortController.signal,
-          }
-        )
-      );
-
-      const elapsed = Math.round((performance.now?.() ?? Date.now()) - t0);
-
-      // ⬇️ normalize backend payload to the unified chat shape
-      const normalized = this.normalizeBackendData(res.data?.data, message);
-
-      const aiResponse: AIResponse = {
-        success: true,
-        data: normalized,
-        meta: {
-          ...res.data.meta,
-          requestId,
-          timestamp: new Date().toISOString(),
-          processingTime: res.data?.meta?.processingTime ?? elapsed,
-        },
-      };
-
-      if (context?.cacheKey) this.setCachedResponse(context.cacheKey, aiResponse);
-      return aiResponse;
-    } catch (error) {
-      return this.handleUnknownError(error, requestId);
-    } finally {
-      this.activeRequests.delete(requestId);
-    }
-  }
-
-  public async sendMessageWithFallback(message: string, context?: RequestContext): Promise<AIResponse> {
-    if (!this.connected && this.config.enableMockMode) {
-      if (import.meta.env.DEV) console.log('🔄 Using intelligent mock response');
-      return this.getMockResponse(message);
-    }
-    return this.sendMessage(message, context);
-  }
-
-  public async startDiscovery(dataSourceId: string, options?: unknown): Promise<AIResponse> {
-    const ctx: RequestContext = { priority: 'high', timeout: 60_000, retryable: true };
-    if (!this.connected && this.config.enableMockMode) {
-      return this.getMockDiscoveryResponse(dataSourceId, options);
-    }
-    return this.sendMessage(`Start discovery for data source: ${dataSourceId}`, ctx);
-  }
-
-  public async getDiscoveryStatus(sessionId: string): Promise<AIDiscoverySession | null> {
-    if (!this.connected && this.config.enableMockMode) return this.getMockDiscoverySession(sessionId);
-    try {
-      const res = await this.requestWithRetry(() => this.api.get(`/discovery/${sessionId}`));
-      return res.data.data as AIDiscoverySession;
-    } catch (err) {
-      console.error('Failed to get discovery status:', err);
-      return null;
-    }
-  }
-
-  public async generateQualityRules(fieldInfo: any): Promise<AIResponse> {
-    if (!this.connected && this.config.enableMockMode) return this.getMockQualityRulesResponse(fieldInfo);
-    try {
-      const res = await this.requestWithRetry(() =>
-        this.api.post('/discovery/quality-rules', { fieldInfo })
-      );
-
-      // Normalize if backend returns { rules: [...] }
-      const normalized = this.normalizeBackendData(res.data?.data, `quality rules for ${fieldInfo?.name ?? 'field'}`);
-
-      return { success: true, data: normalized, meta: res.data.meta };
-    } catch (err) {
-      return this.handleUnknownError(err);
-    }
-  }
-
-  public async checkHealth(): Promise<unknown> {
-    try {
-      const res = await this.requestWithRetry(() => this.api.get(HEALTH_PATH), { skipRetry: true });
-      return res.data;
-    } catch (error) {
-      return {
-        status: 'unhealthy',
-        service: 'cwic-ai-service',
-        version: '1.0.0',
-        timestamp: new Date().toISOString(),
-        mode: 'fallback',
-        error: (error as Error).message,
-      };
-    }
-  }
-
-  public cancelRequest(requestId: string): boolean {
-    const controller = this.activeRequests.get(requestId);
-    if (controller) {
-      controller.abort();
-      this.activeRequests.delete(requestId);
-      return true;
-    }
-    return false;
-  }
-
-  public cancelAllRequests(): void {
-    for (const controller of this.activeRequests.values()) controller.abort();
-    this.activeRequests.clear();
-  }
-
-  public getMetrics(): ConnectionMetrics {
-    return { ...this.metrics, uptime: Date.now() - this.metrics.uptime };
-  }
-
-  /* ---------- error & utils ---------- */
   private handleSpecificErrors(error: AxiosError): void {
     const status = error.response?.status;
     const code = (error as any).code;
 
-    if (status === 401) return this.handleUnauthorized();
-    if (status === 429) return this.handleRateLimit(error);
-    if (status === 503) return this.handleServiceUnavailable();
-
-    if (code === 'ECONNABORTED') this.handleTimeout();
-    else if (code === 'ERR_NETWORK' || code === 'NETWORK_ERROR') this.handleNetworkError();
+    if (status === 401) {
+      this.handleUnauthorized();
+    } else if (status === 429) {
+      this.handleRateLimit(error);
+    } else if (status === 503) {
+      this.handleServiceUnavailable();
+    } else if (code === 'ECONNABORTED') {
+      this.handleTimeout();
+    } else if (code === 'ERR_NETWORK' || code === 'NETWORK_ERROR') {
+      this.handleNetworkError();
+    }
   }
 
   private createEnhancedError(axiosError: AxiosError): AIServiceError {
     const status = axiosError.response?.status;
     const data = axiosError.response?.data as any;
 
-    if (status === 401) return new AuthenticationError(data?.message || 'Authentication required');
-    if ((axiosError as any).code === 'ECONNABORTED') return new TimeoutError(data?.message || 'Request timed out');
-    if (!axiosError.response) return new NetworkError('Unable to connect to AI service');
+    if (status === 401) {
+      return new AuthenticationError(data?.message || 'Authentication required');
+    }
+    
+    if ((axiosError as any).code === 'ECONNABORTED') {
+      return new TimeoutError(data?.message || 'Request timed out');
+    }
+    
+    if (!axiosError.response) {
+      return new NetworkError('Unable to connect to AI service');
+    }
 
     const message = data?.error?.message || data?.message || axiosError.message;
     const code = data?.error?.code || `HTTP_${status}`;
@@ -649,24 +557,34 @@ class AIAssistantService {
     return new AIServiceError(code, message, retryable, {
       status,
       originalError: axiosError.message,
-      response: data,
+      response: isProduction ? undefined : data,
     });
   }
 
   private handleUnauthorized(): void {
-    this.clearAuthTokens();
     if (isBrowser) {
-      window.dispatchEvent(new CustomEvent('ai-service-auth-required'));
-      if (!import.meta.env.DEV && !window.location.pathname.includes('/login')) {
-        window.location.href = '/login';
+      try {
+        localStorage.removeItem('authToken');
+        sessionStorage.removeItem('authToken');
+        localStorage.removeItem('access_token');
+        sessionStorage.removeItem('access_token');
+      } catch {
+        // Ignore storage errors
       }
+
+      // Emit custom event for app to handle
+      window.dispatchEvent(new CustomEvent('ai-service-auth-required'));
     }
   }
 
   private handleRateLimit(error: AxiosError): void {
     const retryAfter = (error.response?.headers as any)?.['retry-after'];
-    const delay = retryAfter ? parseInt(retryAfter, 10) * 1000 : 60_000;
-    console.warn(`⏰ Rate limit exceeded. Retry after ${delay}ms`);
+    const delay = retryAfter ? parseInt(retryAfter, 10) * 1000 : 60000;
+    
+    if (this.config.enableLogging) {
+      console.warn(`[AI Service] Rate limited. Retry after ${delay}ms`);
+    }
+    
     if (isBrowser) {
       window.dispatchEvent(
         new CustomEvent('ai-service-rate-limited', { detail: { retryAfter: delay } })
@@ -676,41 +594,218 @@ class AIAssistantService {
 
   private handleServiceUnavailable(): void {
     this.connected = false;
-    console.warn('🚫 AI Service temporarily unavailable');
+    if (this.config.enableLogging) {
+      console.warn('[AI Service] Service temporarily unavailable');
+    }
   }
-  private handleTimeout(): void { console.warn('⏱️ AI Service request timed out'); }
-  private handleNetworkError(): void { this.connected = false; console.warn('🌐 Network error connecting to AI service'); }
+
+  private handleTimeout(): void {
+    if (this.config.enableLogging) {
+      console.warn('[AI Service] Request timed out');
+    }
+  }
+
+  private handleNetworkError(): void {
+    this.connected = false;
+    if (this.config.enableLogging) {
+      console.warn('[AI Service] Network error detected');
+    }
+  }
 
   private updateAverageResponseTime(newTime: number): void {
     const n = this.metrics.successfulRequests;
-    this.metrics.averageResponseTime =
-      n <= 1 ? newTime : ((this.metrics.averageResponseTime * (n - 1)) + newTime) / n;
+    if (n <= 1) {
+      this.metrics.averageResponseTime = newTime;
+    } else {
+      this.metrics.averageResponseTime = 
+        ((this.metrics.averageResponseTime * (n - 1)) + newTime) / n;
+    }
   }
 
   private getCachedResponse(key: string): AIResponse | null {
     const entry = this.responseCache.get(key);
-    if (entry && Date.now() - entry.timestamp < this.config.cacheDuration) return entry.response;
+    if (entry && Date.now() - entry.timestamp < this.config.cacheDuration) {
+      return entry.response;
+    }
+    this.responseCache.delete(key);
     return null;
   }
+
   private setCachedResponse(key: string, response: AIResponse): void {
-    this.responseCache.set(key, { response, timestamp: Date.now() });
-    if (this.responseCache.size > this.MAX_CACHE_SIZE) {
-      const oldest = [...this.responseCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
-      this.responseCache.delete(oldest[0][0]);
+    this.responseCache.set(key, { 
+      response, 
+      timestamp: Date.now() 
+    });
+  }
+
+  /* =========================
+   Public API
+   ========================= */
+  public isConnected(): boolean {
+    return this.connected;
+  }
+
+  public getConnectionStatus(): 'connected' | 'disconnected' | 'connecting' {
+    if (this.connectionAttempts > 0 && !this.connected) return 'connecting';
+    return this.connected ? 'connected' : 'disconnected';
+  }
+
+  public getMetrics(): ConnectionMetrics {
+    return {
+      ...this.metrics,
+      uptime: Date.now() - this.metrics.uptime
+    };
+  }
+
+  public async sendMessage(message: string, context?: RequestContext): Promise<AIResponse> {
+    if (!message?.trim()) {
+      return {
+        success: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: 'Message cannot be empty',
+          retryable: false
+        }
+      };
+    }
+
+    const requestId = context?.requestId || generateRequestId();
+
+    // Check cache first
+    if (context?.cacheKey) {
+      const cached = this.getCachedResponse(context.cacheKey);
+      if (cached) return cached;
+    }
+
+    // Use mock response if not connected and mock mode enabled
+    if (!this.connected && this.config.enableMockMode) {
+      if (this.config.enableLogging) {
+        console.log('[AI Service] Using mock response (service unavailable)');
+      }
+      return this.getMockResponse(message);
+    }
+
+    // Check connection
+    await this.checkConnection();
+
+    try {
+      const abortController = new AbortController();
+      this.activeRequests.set(requestId, abortController);
+
+      const startTime = performance.now?.() ?? Date.now();
+
+      const response = await this.requestWithRetry(() =>
+        this.api.post('/discovery/query', {
+          query: message,
+          context: {
+            timestamp: new Date().toISOString(),
+            clientType: 'web',
+            userAgent: isBrowser ? navigator.userAgent : 'node',
+            ...context,
+          },
+        }, {
+          timeout: context?.timeout || this.config.timeout,
+          signal: abortController.signal,
+        })
+      );
+
+      const processingTime = Math.round((performance.now?.() ?? Date.now()) - startTime);
+
+      const aiResponse: AIResponse = {
+        success: true,
+        data: this.normalizeResponseData(response.data?.data, message),
+        meta: {
+          processingTime,
+          model: response.data?.meta?.model || 'unknown',
+          requestId,
+          timestamp: new Date().toISOString(),
+          ...response.data?.meta,
+        },
+      };
+
+      // Cache successful response
+      if (context?.cacheKey) {
+        this.setCachedResponse(context.cacheKey, aiResponse);
+      }
+
+      return aiResponse;
+
+    } catch (error) {
+      return this.handleRequestError(error, requestId);
+    } finally {
+      this.activeRequests.delete(requestId);
     }
   }
 
-  private handleUnknownError(error: unknown, requestId?: string): AIResponse {
-    const aiError =
-      error instanceof AIServiceError
-        ? error
-        : (error as AxiosError)?.isAxiosError
+  private normalizeResponseData(rawData: any, originalQuery?: string): AIResponse['data'] {
+    if (!rawData) {
+      return {
+        message: 'No response received from AI service.',
+        type: 'text'
+      };
+    }
+
+    // If already normalized
+    if (rawData.type && rawData.message) {
+      return rawData as AIResponse['data'];
+    }
+
+    // Handle different response types
+    if (rawData.sql && rawData.explanation) {
+      return {
+        message: "Here's the generated SQL query:",
+        type: 'query',
+        results: {
+          sql: rawData.sql,
+          explanation: rawData.explanation,
+          tables: rawData.tables,
+          fields: rawData.fields,
+          confidence: rawData.confidence,
+          warnings: rawData.warnings,
+        },
+        actions: [{
+          type: 'view_details',
+          label: 'Copy SQL',
+          payload: { sql: rawData.sql, query: originalQuery }
+        }],
+      };
+    }
+
+    if (rawData.analysis && rawData.qualityIssues) {
+      return {
+        message: "Data quality analysis complete:",
+        type: 'analysis',
+        results: rawData,
+        actions: [{
+          type: 'create_rule',
+          label: 'Create Quality Rules',
+          payload: { issues: rawData.qualityIssues }
+        }],
+      };
+    }
+
+    // Fallback for unknown formats
+    if (typeof rawData === 'string') {
+      return { message: rawData, type: 'text' };
+    }
+
+    return {
+      message: 'Analysis complete.',
+      type: 'data',
+      results: rawData
+    };
+  }
+
+  private handleRequestError(error: unknown, requestId?: string): AIResponse {
+    const aiError = error instanceof AIServiceError
+      ? error
+      : (error as AxiosError)?.isAxiosError
         ? this.createEnhancedError(error as AxiosError)
         : new AIServiceError(
             'UNKNOWN_ERROR',
             (error as Error)?.message || 'An unexpected error occurred',
             false,
-            error
+            isProduction ? undefined : error
           );
 
     return {
@@ -718,7 +813,7 @@ class AIAssistantService {
       error: {
         code: aiError.code,
         message: aiError.message,
-        details: import.meta.env.DEV ? aiError.details : undefined,
+        details: isProduction ? undefined : aiError.details,
         retryable: aiError.retryable,
       },
       meta: {
@@ -730,200 +825,79 @@ class AIAssistantService {
     };
   }
 
-  private generateRequestId(): string {
-    return `req_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-  }
-  private getAuthToken(): string | null {
-    try {
-      return (
-        localStorage.getItem('authToken') ||
-        sessionStorage.getItem('authToken') ||
-        null
-      );
-    } catch {
-      return null;
-    }
-  }
-  private clearAuthTokens(): void {
-    try { localStorage.removeItem('authToken'); sessionStorage.removeItem('authToken'); } catch {}
-  }
-  private getUserContext(): any {
-    try { const s = localStorage.getItem('user') || sessionStorage.getItem('user'); return s ? JSON.parse(s) : null; } catch { return null; }
-  }
-  private sanitizeHeaders(headers: any): any {
-    const h = { ...(headers || {}) };
-    if (h.Authorization) h.Authorization = 'Bearer [REDACTED]';
-    if (h.authorization) h.authorization = 'Bearer [REDACTED]';
-    return h;
-  }
-
-  /* ---------- mocks ---------- */
   private getMockResponse(query: string): AIResponse {
-    const lower = query.toLowerCase();
-    const requestId = this.generateRequestId();
+    const requestId = generateRequestId();
+    const lowerQuery = query.toLowerCase();
 
-    const base = {
-      success: true as const,
-      meta: {
-        processingTime: Math.floor(Math.random() * 500 + 100),
-        model: 'cwic-ai-mock',
-        requestId,
-        timestamp: new Date().toISOString(),
-        confidence: 0.9 + Math.random() * 0.1,
-      },
-    };
-
-    if (/\b(hi|hello|hey)\b/.test(lower)) {
+    if (lowerQuery.includes('hello') || lowerQuery.includes('hi')) {
       return {
-        ...base,
+        success: true,
         data: {
-          message:
-            "Hello! I'm your CWIC AI Assistant. I can help with data discovery, quality analysis, pipeline management, and more. What would you like to explore?",
+          message: "Hello! I'm your AI assistant. I can help with data discovery, quality analysis, and more.",
           type: 'text',
           suggestions: [
-            'Show me all data sources',
-            'Analyze data quality issues',
-            'Find sensitive data fields',
-            'Generate quality rules',
-            'Check pipeline status',
-          ],
+            'Show me data sources',
+            'Analyze data quality',
+            'Find sensitive data',
+          ]
         },
+        meta: {
+          processingTime: 100,
+          model: 'mock',
+          requestId,
+          timestamp: new Date().toISOString(),
+        }
       };
     }
 
-    if (lower.includes('data source')) {
-      return {
-        ...base,
-        data: {
-          message: 'Here are your connected data sources:',
-          type: 'data',
-          results: [
-            { id: 'ds-001', name: 'Production Database', type: 'PostgreSQL', status: 'Connected', tables: 45, lastSync: '2 minutes ago', health: 'Excellent', volume: '2.3TB' },
-            { id: 'ds-002', name: 'Analytics Warehouse', type: 'Snowflake', status: 'Connected', tables: 23, lastSync: '5 minutes ago', health: 'Good', volume: '850GB' },
-            { id: 'ds-003', name: 'Customer CRM', type: 'MongoDB', status: 'Connected', collections: 12, lastSync: '1 minute ago', health: 'Excellent', volume: '124GB' },
-          ],
-          sources: ['Data Catalog Service'],
-          actions: [
-            { type: 'view_details', label: 'View Details', description: 'See detailed information about each data source' },
-            { type: 'schedule_analysis', label: 'Schedule Analysis', description: 'Set up automated data quality monitoring' },
-          ],
-        },
-      };
-    }
-
-    if (lower.includes('quality') || lower.includes('issue')) {
-      return {
-        ...base,
-        data: {
-          message: "Here's your comprehensive data quality analysis:",
-          type: 'analysis',
-          results: {
-            summary: {
-              overallScore: 87.3,
-              criticalIssues: 5,
-              warningIssues: 12,
-              totalRecordsScanned: 1_234_567,
-              lastAnalysis: '2 hours ago',
-              trend: 'improving',
-            },
-            issues: [
-              { id: 'q-001', type: 'Missing Values', table: 'customers', field: 'email', count: 234, severity: 'medium', impact: 'Customer communication issues', recommendation: 'Implement email validation at input' },
-              { id: 'q-002', type: 'Format Inconsistency', table: 'orders', field: 'phone', count: 89, severity: 'low', impact: 'Contact data reliability', recommendation: 'Standardize phone number format' },
-              { id: 'q-003', type: 'Duplicate Records', table: 'products', field: 'sku', count: 15, severity: 'high', impact: 'Inventory management errors', recommendation: 'Create unique constraint on SKU field' },
-            ],
-            recommendations: [
-              'Implement data validation rules',
-              'Set up automated quality monitoring',
-              'Create data stewardship workflows',
-            ],
-          },
-          sources: ['Quality Engine', 'Data Profiler'],
-          actions: [
-            { type: 'create_rule', label: 'Create Quality Rules', description: 'Generate automated quality rules' },
-            { type: 'export_data', label: 'Export Report', description: 'Download detailed quality report' },
-          ],
-        },
-      };
-    }
-
-    return {
-      ...base,
-      data: {
-        message: `I understand you're asking about "${query}". Here's what I can help you with:
-
-🔍 **Data Discovery** — Find and catalog data assets
-📊 **Quality Analysis** — Identify and resolve data issues
-🛡️ **Compliance** — Check for PII/PHI and regulatory compliance
-🔄 **Pipeline Management** — Monitor data workflows
-📋 **Documentation** — Auto-generate data documentation
-⚡ **Natural Language** — Convert questions to insights
-
-Try asking about "data sources", "quality issues", or "sensitive data".`,
-        type: 'text',
-        suggestions: [
-          'Show me all data sources',
-          'Analyze data quality issues',
-          'Find sensitive data fields',
-          'Generate quality rules',
-          'Check pipeline status',
-        ],
-      },
-    };
-  }
-
-  private getMockDiscoveryResponse(dataSourceId: string, _options?: unknown): AIResponse {
     return {
       success: true,
       data: {
-        message: `Started discovery for data source "${dataSourceId}". I'll update you as phases complete.`,
+        message: `I understand you're asking about "${query}". This is a mock response since the AI service is not available.`,
         type: 'text',
-        actions: [{ type: 'view_details', label: 'View Session', description: 'Open discovery session details' }],
+        suggestions: ['Try again when service is available']
       },
-      meta: { processingTime: 100, model: 'cwic-ai-mock', timestamp: new Date().toISOString() },
+      meta: {
+        processingTime: 100,
+        model: 'mock',
+        requestId,
+        timestamp: new Date().toISOString(),
+      }
     };
   }
 
-  private getMockDiscoverySession(sessionId: string): AIDiscoverySession {
-    const now = new Date();
-    return {
-      sessionId,
-      status: 'running',
-      progress: 42,
-      phase: 'analysis',
-      results: {
-        tablesAnalyzed: 120,
-        columnsFound: 1840,
-        sensitiveDataFound: 18,
-        qualityIssues: 34,
-        complianceFlags: 7,
-        recommendations: ['Mask PII columns', 'Add NOT NULL to customers.email'],
-      },
-      startedAt: new Date(now.getTime() - 5 * 60 * 1000),
-      estimatedCompletion: new Date(now.getTime() + 7 * 60 * 1000),
-    };
+  public cancelRequest(requestId: string): boolean {
+    const controller = this.activeRequests.get(requestId);
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+      this.activeRequests.delete(requestId);
+      return true;
+    }
+    return false;
   }
 
-  private getMockQualityRulesResponse(fieldInfo: any): AIResponse {
-    return {
-      success: true,
-      data: {
-        message: 'Proposed quality rules generated.',
-        type: 'data',
-        results: [
-          { rule: 'NOT NULL', field: fieldInfo?.name, severity: 'high' },
-          { rule: 'UNIQUE', field: fieldInfo?.name, severity: 'high' },
-          { rule: 'FORMAT: email', field: fieldInfo?.name, severity: 'medium' },
-        ],
-        actions: [{ type: 'create_rule', label: 'Apply Rules', description: 'Create and enable these rules' }],
-      },
-      meta: { processingTime: 120, model: 'cwic-ai-mock', timestamp: new Date().toISOString() },
-    };
+  public cancelAllRequests(): void {
+    for (const controller of this.activeRequests.values()) {
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+    }
+    this.activeRequests.clear();
+  }
+
+  public destroy(): void {
+    this.stopPeriodicCleanup();
+    this.cancelAllRequests();
+    this.responseCache.clear();
+    this.connected = false;
   }
 }
 
 /* =========================
-   Exports
+   Singleton Export
    ========================= */
 export const aiAssistantService = new AIAssistantService();
 export default aiAssistantService;
 
+// Named exports for flexibility
+export { AIAssistantService, AIServiceError, AuthenticationError, NetworkError, TimeoutError };

@@ -1,11 +1,16 @@
-﻿FROM node:18-alpine
+﻿# ---------- deps ----------
+FROM node:20-alpine AS deps
 WORKDIR /app
-
-RUN npm install -g nodemon ts-node
 COPY package*.json ./
-COPY tsconfig.json ./
-RUN npm install
+# Use ci if lockfile exists; otherwise fallback to install
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm i --no-audit --no-fund; fi
 
-COPY src/ ./src/
+# ---------- dev runtime ----------
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=development
+# keep node_modules from deps, code will be bind-mounted by compose
+COPY --from=deps /app/node_modules ./node_modules
+COPY package*.json ./
 EXPOSE 8000
-CMD ["npm", "run", "dev"]
+CMD ["npm","run","dev"]

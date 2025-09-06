@@ -1,25 +1,21 @@
-FROM node:18-alpine AS builder
+# backend/api-gateway/Dockerfile
+FROM node:18-alpine AS deps
 WORKDIR /app
-
-# install ALL deps (including typescript) to build
 COPY package*.json ./
-COPY tsconfig.json ./
 RUN npm ci
 
-COPY src/ ./src/
+FROM node:18-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY tsconfig.json ./
+COPY src ./src
 RUN npm run build
 
-FROM node:18-alpine AS production
+FROM node:18-alpine AS runtime
 WORKDIR /app
-
-RUN addgroup -g 1001 -S nodejs && adduser -S cwic -u 1001
-# copy built app + only prod deps
-COPY --from=builder /app/dist ./dist
+ENV NODE_ENV=production
+COPY --from=build /app/dist ./dist
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-
-USER cwic
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD wget -qO- http://localhost:8000/health || exit 1
-CMD ["npm","run","dev"]
+CMD ["node","dist/server.js"]
