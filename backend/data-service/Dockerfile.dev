@@ -1,21 +1,11 @@
 ﻿FROM node:20-alpine
-
 WORKDIR /app
-# OS deps for curl in HEALTHCHECKs, etc.
 RUN apk add --no-cache curl
-
 COPY package*.json ./
-# dev image needs devDependencies (nodemon/ts-node/etc.)
-RUN npm ci
-
-# Ensure logs dir exists and is writable by node
-RUN mkdir -p /app/logs && chown -R node:node /app
-USER node
-
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
-
+USER node
 EXPOSE 3002
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3002/health || exit 1
-
 CMD ["npm","run","dev"]

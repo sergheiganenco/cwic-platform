@@ -39,7 +39,7 @@ services:
     environment:
       NODE_ENV: development
       PORT: 8000
-      DATA_SERVICE_URL: http://data-service:3002
+      DATA_SERVICE_URL: http://data-service:3002   # resolvable on the same network
       AI_SERVICE_URL: http://ai-service:3003
       AUTH_SERVICE_URL: http://auth-service:8001
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
@@ -55,11 +55,18 @@ services:
       ai-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8000/health',r=>{process.exit(r.statusCode===200?0:1)})"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:8000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
       interval: 10s
       timeout: 3s
       start_period: 15s
       retries: 3
+    networks:
+      - cwic-network
+
 
   # ---------- AUTH SERVICE ----------
   auth-service:
@@ -95,10 +102,12 @@ services:
       retries: 3
 
   # ---------- DATA SERVICE ----------
+  # ---------- DATA SERVICE ----------
   data-service:
     build:
       context: ./backend/data-service
       dockerfile: Dockerfile.dev
+    command: ["npm","run","dev"]         # <<< keep this
     ports: ["3002:3002"]
     environment:
       NODE_ENV: development
@@ -107,8 +116,11 @@ services:
       PORT: 3002
       HOST: 0.0.0.0
       DATABASE_URL: ${DATABASE_URL:-postgresql://cwic_user:cwic_secure_pass@db:5432/cwic_platform}
-      ENABLE_FILE_LOGGING: "false"    # avoid FS writes during dev
+      ENABLE_FILE_LOGGING: "false"
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+      # Windows/WSL file watching (optional but helpful)
+      CHOKIDAR_USEPOLLING: "1"
+      CHOKIDAR_INTERVAL: "300"
     volumes:
       - ./backend/data-service:/app
       - /app/node_modules
@@ -116,13 +128,17 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3002/health"]
+      test: ["CMD","node","-e","require('http').get('http://127.0.0.1:3002/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       start_period: 15s
       retries: 3
+    networks:               
+      - cwic-network
 
-  # ---------- AI SERVICE ----------
+
+    # ---------- AI SERVICE ----------
+
   ai-service:
     build:
       context: ./backend/ai-service
@@ -132,15 +148,23 @@ services:
       NODE_ENV: development
       PORT: 3003
       HOST: 0.0.0.0
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
     volumes:
       - ./backend/ai-service:/app
       - /app/node_modules
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3003/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3003/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
       interval: 10s
       timeout: 3s
       start_period: 15s
       retries: 3
+    networks:
+      - cwic-network
+
 
   # ---------- PIPELINE SERVICE ----------
   pipeline-service:

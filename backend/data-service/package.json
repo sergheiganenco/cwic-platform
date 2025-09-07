@@ -4,9 +4,10 @@
   "description": "CWIC Data Governance Service - Data Source and Asset Management",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -b",
+    "postbuild": "tsc-alias -p tsconfig.json",
     "start": "node dist/server.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "ts-node-dev --respawn --transpile-only --ignore-watch node_modules --ignore-watch dist -r tsconfig-paths/register src/server.ts",
     "dev:watch": "nodemon --exec ts-node src/server.ts",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -37,6 +38,7 @@
     "compression": "^1.7.4",
     "cors": "^2.8.5",
     "csv-parser": "^3.0.0",
+    "cwic-platform": "file:../..",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
@@ -53,7 +55,8 @@
     "redis": "^4.6.10",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^4.1.5"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -78,6 +81,8 @@
     "ts-jest": "^29.1.1",
     "ts-node": "^10.9.1",
     "ts-node-dev": "^2.0.0",
+    "tsc-alias": "^1.8.16",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.3.3"
   },
   "engines": {

@@ -2,6 +2,7 @@
 import { Pool, PoolClient, QueryResult } from 'pg';
 import { config } from '../config/env';
 import { logger, loggerUtils } from '../utils/logger';
+import { extraMigrations } from './DatabaseService.migrations.additions';
 
 export interface DatabaseConfig {
   host: string;
@@ -16,11 +17,17 @@ export interface DatabaseConfig {
   connectionTimeoutMillis?: number;
 }
 
-export interface QueryOptions { timeout?: number; retries?: number; retryDelay?: number; }
+export interface QueryOptions { 
+  timeout?: number; 
+  retries?: number; 
+  retryDelay?: number; 
+}
+
 export interface TransactionOptions {
   timeout?: number;
   isolationLevel?: 'READ_UNCOMMITTED'|'READ_COMMITTED'|'REPEATABLE_READ'|'SERIALIZABLE';
 }
+
 export interface HealthCheckResult {
   status: 'healthy' | 'unhealthy';
   latency?: number;
@@ -28,8 +35,21 @@ export interface HealthCheckResult {
   error?: string;
   timestamp: string;
 }
-export interface PoolStats { total: number; idle: number; waiting: number; max: number; min: number; }
-export interface Migration { id: number; name: string; sql: string; executedAt?: Date; }
+
+export interface PoolStats { 
+  total: number; 
+  idle: number; 
+  waiting: number; 
+  max: number; 
+  min: number; 
+}
+
+export interface Migration { 
+  id: number; 
+  name: string; 
+  sql: string; 
+  executedAt?: Date; 
+}
 
 export class DatabaseService {
   private pool!: Pool;
@@ -37,8 +57,8 @@ export class DatabaseService {
   private migrations: Migration[] = [];
 
   constructor() {
-    this.initializePool();
     this.setupMigrations();
+    this.initializePool();
   }
 
   private initializePool(): void {
@@ -57,195 +77,273 @@ export class DatabaseService {
 
     this.pool = new Pool(dbConfig);
 
-    this.pool.on('error', (err: Error) => {
-      logger.error('Database pool error:', { error: err.message, stack: err.stack });
+    // Enhanced error handling
+    this.pool.on('error', (err: Error, client?: PoolClient) => {
+      logger.error('Database pool error:', { 
+        error: err.message, 
+        stack: err.stack,
+        clientProcessID: (client as any)?.processID 
+      });
+    });
+
+    this.pool.on('connect', (client: PoolClient) => {
+      loggerUtils.logDbOperation('connect', 'pool', 0, true);
+    });
+
+    this.pool.on('remove', (client: PoolClient) => {
+      loggerUtils.logDbOperation('disconnect', 'pool', 0, true);
     });
 
     logger.info('Database pool initialized', {
-      host: dbConfig.host, port: dbConfig.port, database: dbConfig.database,
-      maxConnections: dbConfig.max, minConnections: dbConfig.min, ssl: !!dbConfig.ssl,
+      host: dbConfig.host, 
+      port: dbConfig.port, 
+      database: dbConfig.database,
+      maxConnections: dbConfig.max, 
+      minConnections: dbConfig.min, 
+      ssl: !!dbConfig.ssl,
     });
 
     this.isInitialized = true;
   }
 
-  /** ───────────────────────────── Migrations ───────────────────────────── */
-  // ...imports & class skeleton unchanged...
+  private setupMigrations(): void {
+    this.migrations = [
+      {
+        id: 0,
+        name: '000_enable_pgcrypto',
+        sql: `CREATE EXTENSION IF NOT EXISTS pgcrypto;`
+      },
+      {
+        id: 1,
+        name: '001_create_data_sources_table',
+        sql: `
+          CREATE TABLE IF NOT EXISTS data_sources (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name VARCHAR(100) NOT NULL,
+            type VARCHAR(50) NOT NULL,
+            host VARCHAR(255),
+            port INTEGER CHECK (port > 0 AND port <= 65535),
+            database_name VARCHAR(100),
+            username VARCHAR(100),
+            password_encrypted TEXT,
+            ssl BOOLEAN DEFAULT FALSE,
+            connection_string TEXT,
+            description TEXT,
+            tags TEXT[] DEFAULT '{}',
+            status VARCHAR(20) DEFAULT 'active',
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            last_tested_at TIMESTAMPTZ,
+            last_sync_at TIMESTAMPTZ
+          );
 
-// backend/data-service/src/services/DatabaseService.ts
-private setupMigrations(): void {
-  this.migrations = [
-    {
-      id: 0,
-      name: '000_enable_pgcrypto',
-      sql: `CREATE EXTENSION IF NOT EXISTS pgcrypto;`
-    },
-    {
-      id: 1,
-      name: '001_create_data_sources_table',
-      sql: `
-        CREATE TABLE IF NOT EXISTS data_sources (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          name VARCHAR(100) NOT NULL,
-          type VARCHAR(50) NOT NULL,
-          host VARCHAR(255),
-          port INTEGER CHECK (port > 0 AND port <= 65535),
-          database_name VARCHAR(100),
-          username VARCHAR(100),
-          password_encrypted TEXT,
-          ssl BOOLEAN DEFAULT FALSE,
-          connection_string TEXT,
-          description TEXT,
-          tags TEXT[] DEFAULT '{}',
-          status VARCHAR(20) DEFAULT 'active',
-          metadata JSONB DEFAULT '{}',
-          created_at TIMESTAMPTZ DEFAULT NOW(),
-          updated_at TIMESTAMPTZ DEFAULT NOW(),
-          last_tested_at TIMESTAMPTZ,
-          last_sync_at TIMESTAMPTZ
-        );
+          CREATE OR REPLACE FUNCTION update_updated_at_column()
+          RETURNS TRIGGER AS $$
+          BEGIN
+            NEW.updated_at = NOW();
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql;
 
-        CREATE OR REPLACE FUNCTION update_updated_at_column()
-        RETURNS TRIGGER AS $$
-        BEGIN
-          NEW.updated_at = NOW();
-          RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
+          DROP TRIGGER IF EXISTS update_data_sources_updated_at ON data_sources;
+          CREATE TRIGGER update_data_sources_updated_at
+            BEFORE UPDATE ON data_sources
+            FOR EACH ROW
+            EXECUTE FUNCTION update_updated_at_column();
 
-        DROP TRIGGER IF EXISTS update_data_sources_updated_at ON data_sources;
-        CREATE TRIGGER update_data_sources_updated_at
-          BEFORE UPDATE ON data_sources
-          FOR EACH ROW
-          EXECUTE FUNCTION update_updated_at_column();
+          CREATE INDEX IF NOT EXISTS idx_data_sources_type ON data_sources(type);
+          CREATE INDEX IF NOT EXISTS idx_data_sources_status ON data_sources(status);
+          CREATE INDEX IF NOT EXISTS idx_data_sources_name ON data_sources(name);
+          CREATE INDEX IF NOT EXISTS idx_data_sources_tags ON data_sources USING GIN(tags);
+        `
+      },
+      {
+        id: 6,
+        name: '006_align_data_sources_schema',
+        sql: `
+          -- Add missing columns from your connection test requirements
+          ALTER TABLE data_sources
+            ADD COLUMN IF NOT EXISTS connection_config JSONB DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS created_by VARCHAR(100),
+            ADD COLUMN IF NOT EXISTS updated_by VARCHAR(100),
+            ADD COLUMN IF NOT EXISTS last_error TEXT,
+            ADD COLUMN IF NOT EXISTS public_id VARCHAR(100),
+            ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS last_test_at TIMESTAMPTZ;
 
-        CREATE INDEX IF NOT EXISTS idx_data_sources_type ON data_sources(type);
-        CREATE INDEX IF NOT EXISTS idx_data_sources_status ON data_sources(status);
-        CREATE INDEX IF NOT EXISTS idx_data_sources_name ON data_sources(name);
-        CREATE INDEX IF NOT EXISTS idx_data_sources_tags ON data_sources USING GIN(tags);
-      `
-    },
-    {
-      id: 6,
-      name: '006_align_data_sources_schema',
-      sql: `
-        ALTER TABLE data_sources
-          ADD COLUMN IF NOT EXISTS connection_config JSONB DEFAULT '{}'::jsonb,
-          ADD COLUMN IF NOT EXISTS created_by VARCHAR(100),
-          ADD COLUMN IF NOT EXISTS updated_by VARCHAR(100),
-          ADD COLUMN IF NOT EXISTS last_error TEXT,
-          ADD COLUMN IF NOT EXISTS public_id VARCHAR(100),
-          ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ,
-          ADD COLUMN IF NOT EXISTS last_test_at TIMESTAMPTZ;  -- tolerate new name
+          -- Backfill new last_test_at from legacy last_tested_at if present
+          UPDATE data_sources
+            SET last_test_at = COALESCE(last_test_at, last_tested_at)
+            WHERE last_tested_at IS NOT NULL;
 
-        -- Backfill new last_test_at from legacy last_tested_at if present
-        UPDATE data_sources
-          SET last_test_at = COALESCE(last_test_at, last_tested_at)
-          WHERE last_tested_at IS NOT NULL;
+          -- Create unique index for public_id
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_indexes
+              WHERE schemaname = 'public' AND indexname = 'uq_data_sources_public_id'
+            ) THEN
+              CREATE UNIQUE INDEX uq_data_sources_public_id
+                ON data_sources ((public_id)) WHERE public_id IS NOT NULL;
+            END IF;
+          END $$;
 
-        DO $$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1 FROM pg_indexes
-            WHERE schemaname = 'public' AND indexname = 'uq_data_sources_public_id'
-          ) THEN
-            CREATE UNIQUE INDEX uq_data_sources_public_id
-              ON data_sources ((public_id)) WHERE public_id IS NOT NULL;
-          END IF;
-        END $$;
+          CREATE INDEX IF NOT EXISTS idx_data_sources_updated_at ON data_sources(updated_at);
+          CREATE INDEX IF NOT EXISTS idx_data_sources_deleted_at ON data_sources(deleted_at);
 
-        CREATE INDEX IF NOT EXISTS idx_data_sources_updated_at ON data_sources(updated_at);
+          -- Drop and recreate constraints safely
+          DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_sources_type_check' AND conrelid = 'data_sources'::regclass) THEN
+              ALTER TABLE data_sources DROP CONSTRAINT data_sources_type_check;
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_sources_status_check' AND conrelid = 'data_sources'::regclass) THEN
+              ALTER TABLE data_sources DROP CONSTRAINT data_sources_status_check;
+            END IF;
+          END $$;
 
-        DO $$
-        BEGIN
-          IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_sources_type_check' AND conrelid = 'data_sources'::regclass) THEN
-            ALTER TABLE data_sources DROP CONSTRAINT data_sources_type_check;
-          END IF;
-          IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_sources_status_check' AND conrelid = 'data_sources'::regclass) THEN
-            ALTER TABLE data_sources DROP CONSTRAINT data_sources_status_check;
-          END IF;
-        END $$;
+          -- Add comprehensive constraints
+          ALTER TABLE data_sources
+            ADD CONSTRAINT chk_data_sources_type CHECK (type IN (
+              'postgresql','mysql','mssql','oracle','mongodb','redis',
+              's3','azure-blob','gcs','snowflake','bigquery','redshift',
+              'databricks','api','file','kafka','elasticsearch'
+            ));
 
-        ALTER TABLE data_sources
-          ADD CONSTRAINT chk_data_sources_type CHECK (type IN (
-            'postgresql','mysql','mssql','oracle','mongodb','redis',
-            's3','azure-blob','gcs','snowflake','bigquery','redshift',
-            'databricks','api','file','kafka','elasticsearch'
-          ));
-
-        ALTER TABLE data_sources
-          ADD CONSTRAINT chk_data_sources_status CHECK (status IN (
-            'active','inactive','pending','error','testing',
-            'connected','disconnected','warning','syncing'
-          ));
-      `
+          ALTER TABLE data_sources
+            ADD CONSTRAINT chk_data_sources_status CHECK (status IN (
+              'active','inactive','pending','error','testing',
+              'connected','disconnected','warning','syncing'
+            ));
+        `
+      }
+    ];
+    
+    // Add extra migrations if they exist
+    if (extraMigrations && Array.isArray(extraMigrations)) {
+      this.migrations.push(...extraMigrations);
     }
-  ];
-}
+  }
 
-
-
-  /** ───────────────────────────── Query helpers ───────────────────────────── */
+  /** Enhanced query method with better error handling */
   public async query(text: string, params?: any[], options: QueryOptions = {}): Promise<QueryResult> {
     const { timeout = 30000, retries = 0, retryDelay = 1000 } = options;
     const start = Date.now();
     const queryId = Math.random().toString(36).substring(7);
     let lastError: Error;
 
+    if (!this.isInitialized) {
+      throw new Error('Database service not initialized');
+    }
+
+    loggerUtils.logDbOperation('query_start', 'general', 0, true);
+
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const result = await this.pool.query({ text, values: params });
+        const queryPromise = this.pool.query({ text, values: params });
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error(`Query timeout after ${timeout}ms`)), timeout)
+        );
+
+        const result = await Promise.race([queryPromise, timeoutPromise]);
         const duration = Date.now() - start;
-        loggerUtils.logDbOperation('select', 'general', duration, true);
+        
+        loggerUtils.logDbOperation('query_success', 'general', duration, true);
+        logger.debug('Database query completed', { queryId, duration, rows: result.rowCount });
+        
         return result;
       } catch (err) {
         lastError = err as Error;
+        const duration = Date.now() - start;
+        
+        logger.error('Database query failed', { 
+          queryId, 
+          attempt: attempt + 1, 
+          duration,
+          error: lastError.message,
+          query: text.substring(0, 100) + (text.length > 100 ? '...' : '')
+        });
+
         if (attempt === retries) {
-          const duration = Date.now() - start;
-          loggerUtils.logDbOperation('select', 'general', duration, false);
+          loggerUtils.logDbOperation('query_failed', 'general', duration, false);
           throw lastError;
         }
-        await new Promise(r => setTimeout(r, retryDelay * (attempt + 1)));
+
+        // Exponential backoff
+        await new Promise(r => setTimeout(r, retryDelay * Math.pow(2, attempt)));
       }
     }
     throw lastError!;
   }
 
-  public async transaction<T>(callback: (client: PoolClient) => Promise<T>, options: TransactionOptions = {}): Promise<T> {
+  /** Enhanced transaction method */
+  public async transaction<T>(
+    callback: (client: PoolClient) => Promise<T>, 
+    options: TransactionOptions = {}
+  ): Promise<T> {
     const { timeout = 30000, isolationLevel } = options;
-    const client = await this.pool.connect();
+    let client: PoolClient | null = null;
+    
     try {
+      client = await this.pool.connect();
       await client.query('BEGIN');
-      if (isolationLevel) await client.query(`SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
+      
+      if (isolationLevel) {
+        await client.query(`SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
+      }
+
+      const timeoutPromise = new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error(`Transaction timeout after ${timeout}ms`)), timeout)
+      );
+
       const result = await Promise.race([
         callback(client),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`Transaction timeout after ${timeout}ms`)), timeout)),
+        timeoutPromise
       ]);
+
       await client.query('COMMIT');
       return result;
     } catch (err) {
-      await client.query('ROLLBACK');
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch (rollbackErr) {
+          logger.error('Failed to rollback transaction', { error: (rollbackErr as Error).message });
+        }
+      }
       throw err;
     } finally {
-      client.release();
+      if (client) {
+        client.release();
+      }
     }
   }
 
+  /** Enhanced health check */
   public async healthCheck(): Promise<HealthCheckResult> {
     const started = Date.now();
     try {
-      await this.pool.query('SELECT 1');
+      if (!this.isInitialized) {
+        throw new Error('Database service not initialized');
+      }
+
+      await this.pool.query('SELECT 1 as health_check');
+      
+      const poolStats = this.getPoolStats();
+      
       return {
         status: 'healthy',
         latency: Date.now() - started,
         connections: {
-          total: (this.pool as any).totalCount ?? 0,
-          idle: (this.pool as any).idleCount ?? 0,
-          waiting: (this.pool as any).waitingCount ?? 0,
+          total: poolStats.total,
+          idle: poolStats.idle,
+          waiting: poolStats.waiting,
         },
         timestamp: new Date().toISOString(),
       };
     } catch (e: any) {
+      logger.error('Database health check failed', { error: e.message });
       return {
         status: 'unhealthy',
         latency: Date.now() - started,
@@ -256,44 +354,109 @@ private setupMigrations(): void {
   }
 
   public getPoolStats(): PoolStats {
-    // @ts-ignore
     return {
-      total: this.pool.totalCount ?? 0,
-      idle: this.pool.idleCount ?? 0,
-      waiting: this.pool.waitingCount ?? 0,
+      total: (this.pool as any).totalCount ?? 0,
+      idle: (this.pool as any).idleCount ?? 0,
+      waiting: (this.pool as any).waitingCount ?? 0,
       max: config.database.poolMax,
       min: config.database.poolMin,
     };
   }
 
+  /** Enhanced migration runner with better error handling */
   public async runMigrations(): Promise<void> {
     logger.info('Running database migrations...');
-    await this.query(`
-      CREATE TABLE IF NOT EXISTS migrations (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL UNIQUE,
-        executed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      )
-    `);
+    
+    try {
+      // Create migrations table if it doesn't exist
+      await this.query(`
+        CREATE TABLE IF NOT EXISTS migrations (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL UNIQUE,
+          executed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
 
-    for (const m of this.migrations) {
-      const seen = await this.query('SELECT 1 FROM migrations WHERE name = $1', [m.name]);
-      if (seen.rowCount) continue;
+      // Get already executed migrations
+      const executedMigrations = await this.query('SELECT name FROM migrations ORDER BY id');
+      const executedNames = new Set(executedMigrations.rows.map(row => row.name));
 
-      logger.info(`Running migration: ${m.name}`);
-      await this.transaction(async (client) => {
-        await client.query(m.sql);
-        await client.query('INSERT INTO migrations (name) VALUES ($1)', [m.name]);
-      });
-      logger.info(`Migration completed: ${m.name}`);
+      let migrationsRun = 0;
+      
+      for (const migration of this.migrations) {
+        if (executedNames.has(migration.name)) {
+          logger.debug(`Migration already applied: ${migration.name}`);
+          continue;
+        }
+
+        logger.info(`Running migration: ${migration.name}`);
+        
+        try {
+          await this.transaction(async (client) => {
+            // Execute the migration SQL
+            await client.query(migration.sql);
+            // Record the migration as completed
+            await client.query(
+              'INSERT INTO migrations (name) VALUES ($1)', 
+              [migration.name]
+            );
+          });
+          
+          migrationsRun++;
+          logger.info(`Migration completed: ${migration.name}`);
+        } catch (migrationError) {
+          logger.error(`Migration failed: ${migration.name}`, { 
+            error: (migrationError as Error).message 
+          });
+          throw new Error(`Migration ${migration.name} failed: ${(migrationError as Error).message}`);
+        }
+      }
+
+      logger.info(`All migrations completed successfully. ${migrationsRun} migrations executed.`);
+    } catch (error) {
+      logger.error('Migration process failed', { error: (error as Error).message });
+      throw error;
     }
-    logger.info('All migrations completed.');
   }
 
+  /** Graceful shutdown */
   public async close(): Promise<void> {
-    await this.pool.end();
-    this.isInitialized = false;
+    if (this.pool && this.isInitialized) {
+      logger.info('Closing database pool...');
+      await this.pool.end();
+      this.isInitialized = false;
+      logger.info('Database pool closed');
+    }
   }
 
-  public isReady(): boolean { return this.isInitialized; }
+  public isReady(): boolean { 
+    return this.isInitialized && this.pool !== null; 
+  }
+
+  /** Utility method to check if a table exists */
+  public async tableExists(tableName: string): Promise<boolean> {
+    const result = await this.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = $1
+      )
+    `, [tableName]);
+    
+    return result.rows[0]?.exists || false;
+  }
+
+  /** Utility method to check if a column exists */
+  public async columnExists(tableName: string, columnName: string): Promise<boolean> {
+    const result = await this.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = $1 
+        AND column_name = $2
+      )
+    `, [tableName, columnName]);
+    
+    return result.rows[0]?.exists || false;
+  }
 }
