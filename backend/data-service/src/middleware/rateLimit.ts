@@ -159,16 +159,27 @@ export const uploadRateLimitMiddleware: RequestHandler = asExpressHandler(
 );
 
 /** Factory */
+/** Factory */
 export const createRateLimit = (options: {
   windowMs: number;
   max: number;
   message?: string;
   skipSuccessfulRequests?: boolean;
+
+  // NEW: allow callers to customize headers (matches express-rate-limit v6)
+  standardHeaders?: boolean;
+  legacyHeaders?: boolean;
+
+  // (optional) allow a custom keyGenerator/skip override
+  keyGenerator?: (req: any) => string;
+  skip?: (req: any, res: any) => boolean;
 }): RequestHandler =>
   asExpressHandler(
     rateLimit({
       windowMs: options.windowMs,
       max: options.max,
+
+      // keep your nice JSON body when a custom message is provided
       message: options.message
         ? {
             success: false,
@@ -177,15 +188,23 @@ export const createRateLimit = (options: {
             timestamp: new Date().toISOString(),
           }
         : undefined,
-      standardHeaders: true,
-      legacyHeaders: false,
-      keyGenerator,
-      skip: options.skipSuccessfulRequests ? skipSuccessfulRequests : undefined,
+
+      // use provided header prefs, fall back to your defaults
+      standardHeaders: options.standardHeaders ?? true,
+      legacyHeaders: options.legacyHeaders ?? false,
+
+      // prefer provided keyGenerator/skip, else your defaults
+      keyGenerator: options.keyGenerator ?? keyGenerator,
+      skip:
+        options.skip ??
+        (options.skipSuccessfulRequests ? skipSuccessfulRequests : undefined),
+
       handler: (req: any, res: any) => {
         res.status(429).json(rateLimitMessage(req, res));
       },
     })
   );
+
 
 export const RATE_LIMITS = {
   GENERAL: { windowMs: 15 * 60 * 1000, max: 100 },
