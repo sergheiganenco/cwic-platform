@@ -1,7 +1,7 @@
 // src/services/api/dataSources.ts
+import http from '@/services/http'
 import type {
   Asset,
-  AssetFilters,
   ConnectionConfig,
   ConnectionTestResult,
   CreateDataSourcePayload,
@@ -12,267 +12,405 @@ import type {
   PaginatedDataSources,
   SyncResult,
   UpdateDataSourcePayload,
-} from '@/types/dataSources';
-import http from "@services/http";
+} from '@/types/dataSources'
+
+/**
+ * NOTE ON TYPES:
+ * - Your '@/types/dataSources' doesn't export AssetFilters and likely has a wider DataSourceType
+ *   and a stricter SyncStatus. To remain source-compatible across backends, this service:
+ *     • uses a local AssetFiltersInput (narrowed when calling),
+ *     • builds normalized results with `any` internally, then casts once on the boundary,
+ *     • uses Partial<Record<...>> maps for display names/features (falls back cleanly).
+ */
 
 /* -------------------------------- Helpers -------------------------------- */
 
-function normalizeTestResult(raw: any): ConnectionTestResult {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      success: true,
-      message: 'Connection OK',
-      testedAt: new Date().toISOString(),
-    };
+function toIso(v?: string | number | Date): string | undefined {
+  if (!v) return undefined
+  try {
+    const d = typeof v === 'string' || typeof v === 'number' ? new Date(v) : v
+    const t = (d as Date).getTime?.() ?? NaN
+    return Number.isNaN(t) ? undefined : new Date(d as Date).toISOString()
+  } catch {
+    return undefined
   }
-  // keep server fields but ensure the basics are present
-  return {
-    success:
-      raw.success ??
-      (raw.connectionStatus ? raw.connectionStatus === 'connected' : undefined),
-    message: raw.message,
-    testedAt: raw.testedAt ?? raw.timestamp ?? new Date().toISOString(),
-    responseTimeMs: raw.responseTimeMs ?? raw.latencyMs,
-    ...raw,
-  };
+}
+
+function boolish(v: any): boolean | undefined {
+  if (v === true || v === false) return v
+  if (v == null) return undefined
+  if (typeof v === 'string') {
+    const s = v.toLowerCase()
+    if (s === 'true') return true
+    if (s === 'false') return false
+  }
+  return undefined
+}
+
+function normalizeTestResult(raw: any): ConnectionTestResult {
+  // Build a permissive shape first, then cast at the boundary.
+  const out: any = {}
+
+  if (!raw || typeof raw !== 'object') {
+    out.success = true
+    out.message = 'Connection OK'
+    out.testedAt = new Date().toISOString()
+    return out as ConnectionTestResult
+  }
+
+  const successFromStatus =
+    typeof raw.status === 'string'
+      ? ['ok', 'success', 'connected'].includes(raw.status.toLowerCase())
+      : undefined
+  const successFromConn =
+    typeof raw.connectionStatus === 'string'
+      ? raw.connectionStatus.toLowerCase() === 'connected'
+      : undefined
+
+  out.success = boolish(raw.success) ?? successFromConn ?? successFromStatus
+  out.message = raw.message || raw.detail || raw.error || raw.reason || undefined
+  out.testedAt =
+    toIso(raw.testedAt) ??
+    toIso(raw.timestamp) ??
+    toIso(raw.checkedAt) ??
+    new Date().toISOString()
+  out.responseTimeMs =
+    typeof raw.responseTimeMs === 'number'
+      ? raw.responseTimeMs
+      : typeof raw.latencyMs === 'number'
+      ? raw.latencyMs
+      : undefined
+
+  // Keep server extras
+  Object.assign(out, raw)
+
+  return out as ConnectionTestResult
 }
 
 function normalizeSyncResult(raw: any, id: string): SyncResult {
-  // Handle 202 with empty body, boolean, etc.
+  // Build untyped, then cast once.
+  const out: any = {}
+
   if (!raw || typeof raw !== 'object') {
-    return {
-      syncId: `local_${Date.now()}_${id}`,
-      status: 'started',
-      startedAt: new Date().toISOString(),
-      errors: [],
-      message: 'Sync started',
-    };
+    out.syncId = `local_${Date.now()}_${id}`
+    out.status = 'started' // internal value; cast later
+    out.startedAt = new Date().toISOString()
+    out.errors = []
+    out.message = 'Sync started'
+    return out as SyncResult
   }
 
-  const syncId =
-    raw.syncId || raw.id || raw.runId || `local_${Date.now()}_${id}`;
+  out.syncId = raw.syncId || raw.id || raw.runId || `local_${Date.now()}_${id}`
+  // Derive a tolerant status then cast once
+  out.status =
+    raw.status ??
+    (raw.completedAt || raw.completed ? 'completed' : 'started') // <- tolerant literals
 
-  let status: SyncResult['status'];
-  if (raw.status === 'ok' || raw.ok === true) status = 'started';
-  else status =
-    (raw.status as SyncResult['status']) ??
-    (raw.completedAt || raw.completed ? 'completed' : 'started');
+  out.startedAt = toIso(raw.startedAt) ?? toIso(raw.started) ?? toIso(raw.timestamp)
+  out.completedAt = toIso(raw.completedAt) ?? toIso(raw.completed)
+  out.tablesScanned = Number(raw.tablesScanned ?? raw.scanned ?? raw.count ?? 0)
+  out.newTables = Number(raw.newTables ?? 0)
+  out.updatedTables = Number(raw.updatedTables ?? 0)
+  out.errors = Array.isArray(raw.errors) ? raw.errors : raw.error ? [String(raw.error)] : []
+  out.message = raw.message ?? undefined
 
-  return {
-    syncId,
-    status,
-    startedAt: raw.startedAt ?? raw.started ?? raw.timestamp,
-    completedAt: raw.completedAt ?? raw.completed,
-    tablesScanned: raw.tablesScanned ?? raw.scanned ?? raw.count ?? 0,
-    newTables: raw.newTables ?? 0,
-    updatedTables: raw.updatedTables ?? 0,
-    errors: raw.errors ?? (raw.error ? [String(raw.error)] : []),
-    message: raw.message,
-    ...raw, // keep any extra fields the server includes
-  };
+  // keep server extras
+  Object.assign(out, raw)
+
+  return out as SyncResult
 }
 
 /* ------------------------------ List params ------------------------------- */
 
 export interface ListDataSourcesParams extends DataSourceFilters {
-  page?: number;
-  limit?: number;
-  sortBy?: 'name' | 'type' | 'status' | 'createdAt' | 'updatedAt';
-  sortOrder?: 'asc' | 'desc';
+  page?: number
+  limit?: number
+  sortBy?: 'name' | 'type' | 'status' | 'createdAt' | 'updatedAt'
+  sortOrder?: 'asc' | 'desc'
 }
 
-export interface ListAssetsParams extends AssetFilters {
-  page?: number;
-  limit?: number;
-  dataSourceId?: string;
-  sortBy?: 'name' | 'type' | 'updatedAt';
-  sortOrder?: 'asc' | 'desc';
+/**
+ * Local, safe filter type for Assets because AssetFilters is not exported from your types.
+ * We accept a generic record here and let the backend ignore unknowns.
+ */
+export type AssetFiltersInput = Record<string, string | number | boolean | undefined> & {
+  tag?: string
+  type?: string
+  owner?: string
+  updatedAfter?: string
 }
 
-/* ------------------------------ DataSources API --------------------------- */
+export interface ListAssetsParams extends AssetFiltersInput {
+  page?: number
+  limit?: number
+  dataSourceId?: string
+  sortBy?: 'name' | 'type' | 'updatedAt'
+  sortOrder?: 'asc' | 'desc'
+}
+
+/* --------------------------------- API ------------------------------------ */
 
 export const dataSourcesApi = {
   async list(params: ListDataSourcesParams = {}) {
-    const { data } = await http.get<PaginatedDataSources>('/data-sources', { params });
-    return data;
+    const { data } = await http.get<PaginatedDataSources>('/data-sources', { params })
+    return data
   },
 
   async getById(id: string) {
-    const { data } = await http.get<DataSource>(`/data-sources/${id}`);
-    return data;
+    const { data } = await http.get<DataSource>(`/data-sources/${id}`)
+    return data
   },
 
   async create(payload: CreateDataSourcePayload) {
-    const { data } = await http.post<DataSource>('/data-sources', payload);
-    return data;
+    const { data } = await http.post<DataSource>('/data-sources', payload)
+    return data
   },
 
   async update(id: string, payload: UpdateDataSourcePayload) {
-    const { data } = await http.put<DataSource>(`/data-sources/${id}`, payload);
-    return data;
+    const { data } = await http.put<DataSource>(`/data-sources/${id}`, payload)
+    return data
   },
 
   async delete(id: string) {
-    await http.delete(`/data-sources/${id}`);
+    await http.delete(`/data-sources/${id}`)
   },
 
-  // Test by id — always return a filled object
   async test(id: string) {
-    const res = await http.post<ConnectionTestResult>(`/data-sources/${id}/test`);
-    return normalizeTestResult(res.data);
+    const res = await http.post<ConnectionTestResult>(`/data-sources/${id}/test`)
+    return normalizeTestResult(res.data)
   },
 
-  // Test config before creating
-  async testConfig(type: DataSourceType, config: ConnectionConfig) {
-    const res = await http.post<ConnectionTestResult>('/data-sources/test', { type, config });
-    return normalizeTestResult(res.data);
-  },
+  /**
+   * Pre-create test endpoint for the wizard.
+   * Azure gateway & data-service accept: { type, config }
+   * Also include `connectionConfig` for backward compatibility.
+   */
+  // ⬇️ replace the previous testConfig() with this version
+async testConfig(
+  type: DataSourceType,
+  connectionConfig: ConnectionConfig,
+  signal?: AbortSignal
+) {
+  // Some gateways expose /data-sources/test, others /connections/test,
+  // some legacy UIs used /data-sources/test-connection. Try them in order.
+  const body = { type, config: connectionConfig, connectionConfig };
 
-  // Sync/discover — normalize even if backend returns empty body/202
+  const candidates = [
+    { method: 'post' as const, url: '/data-sources/test' },
+    { method: 'post' as const, url: '/connections/test' },
+    { method: 'post' as const, url: '/data-sources/test-connection' },
+  ];
+
+  let lastErr: unknown;
+  for (const c of candidates) {
+    try {
+      const res = await http[c.method]<ConnectionTestResult>(c.url, body, { signal });
+      return normalizeTestResult(res.data);
+    } catch (e: any) {
+      // try next only on 404/405; otherwise rethrow
+      const status = e?.response?.status ?? e?.status;
+      if (status !== 404 && status !== 405) throw e;
+      lastErr = e;
+    }
+  }
+  // if all failed, surface the last error
+  throw lastErr ?? new Error('No test endpoint available');
+},
+
+// ⬇️ replace the previous previewDatabases() with this version
+async previewDatabases(
+  type: DataSourceType,
+  connectionConfig: ConnectionConfig,
+  signal?: AbortSignal
+) {
+  const body = { type, config: connectionConfig, connectionConfig };
+
+  const candidates = [
+    { method: 'post' as const, url: '/data-sources/databases/preview' },
+    { method: 'post' as const, url: '/connections/discover' },
+    { method: 'post' as const, url: '/data-sources/discover' },
+  ];
+
+  let lastErr: unknown;
+  for (const c of candidates) {
+    try {
+      const { data } = await http[c.method]<{ databases?: any[]; metadata?: any }>(
+        c.url,
+        body,
+        { signal }
+      );
+      return {
+        databases: Array.isArray(data?.databases) ? data.databases : [],
+        metadata: data?.metadata,
+      };
+    } catch (e: any) {
+      const status = e?.response?.status ?? e?.status;
+      if (status !== 404 && status !== 405) throw e;
+      lastErr = e;
+    }
+  }
+  // graceful fallback
+  return { databases: [], metadata: undefined };
+},
+
+
   async sync(id: string) {
-    const res = await http.post<SyncResult>(`/data-sources/${id}/sync`);
-    return normalizeSyncResult(res.data, id);
+    const res = await http.post<SyncResult>(`/data-sources/${id}/sync`)
+    return normalizeSyncResult(res.data, id)
   },
 
-  // Sync status — normalize too
   async getSyncStatus(id: string) {
-    const res = await http.get<SyncResult>(`/data-sources/${id}/sync/status`);
-    return normalizeSyncResult(res.data, id);
+    const res = await http.get<SyncResult>(`/data-sources/${id}/sync/status`)
+    return normalizeSyncResult(res.data, id)
   },
 
   async updateStatus(id: string, status: DataSource['status'], reason?: string) {
-    const { data } = await http.patch<DataSource>(`/data-sources/${id}/status`, { status, reason });
-    return data;
+    const { data } = await http.patch<DataSource>(`/data-sources/${id}/status`, { status, reason })
+    return data
   },
 
   async getMetrics(id?: string) {
-    const endpoint = id ? `/data-sources/${id}/metrics` : '/data-sources/metrics';
-    const { data } = await http.get<DataSourceMetrics>(endpoint);
-    return data;
+    const endpoint = id ? `/data-sources/${id}/metrics` : '/data-sources/metrics'
+    const { data } = await http.get<DataSourceMetrics>(endpoint)
+    return data
   },
 
   async getHealth(id: string) {
-    const { data } = await http.get<DataSource['healthStatus']>(`/data-sources/${id}/health`);
-    return data;
+    const { data } = await http.get<DataSource['healthStatus']>(`/data-sources/${id}/health`)
+    return data
   },
 
   async duplicate(id: string, newName: string) {
-    const { data } = await http.post<DataSource>(`/data-sources/${id}/duplicate`, { name: newName });
-    return data;
+    const { data } = await http.post<DataSource>(`/data-sources/${id}/duplicate`, { name: newName })
+    return data
   },
 
   async exportConfig(id: string) {
-    const { data } = await http.get(`/data-sources/${id}/export`);
-    return data;
+    const { data } = await http.get(`/data-sources/${id}/export`)
+    return data
   },
 
   async importConfig(config: any) {
-    const { data } = await http.post<DataSource>('/data-sources/import', config);
-    return data;
+    const { data } = await http.post<DataSource>('/data-sources/import', config)
+    return data
   },
 
   async getTemplates(type?: DataSourceType) {
-    const params = type ? { type } : {};
-    const { data } = await http.get('/data-sources/templates', { params });
-    return data;
+    const params = type ? { type } : {}
+    const { data } = await http.get('/data-sources/templates', { params })
+    return data
   },
 
   async validateField(type: DataSourceType, field: string, value: any, config: ConnectionConfig) {
     const { data } = await http.post('/data-sources/validate-field', {
-      type, field, value, config,
-    });
-    return data;
+      type,
+      field,
+      value,
+      config,
+    })
+    return data
   },
-};
+
+  /** Accepts: string[], { name: string }[], or { databases: [...] } */
+  async listDatabases(id: string) {
+    const { data } = await http.get(`/data-sources/${encodeURIComponent(id)}/databases`)
+    if (Array.isArray(data)) {
+      if (data.length === 0) return [] as Array<{ name: string }>
+      if (typeof data[0] === 'string') return (data as string[]).map((name) => ({ name }))
+      if (typeof data[0] === 'object' && data[0] && 'name' in data[0]) return data as Array<{ name: string }>
+    }
+    if (data && Array.isArray((data as any).databases)) {
+      const dbs = (data as any).databases
+      if (dbs.length === 0) return []
+      if (typeof dbs[0] === 'string') return (dbs as string[]).map((name) => ({ name }))
+      if (typeof dbs[0] === 'object' && dbs[0] && 'name' in dbs[0]) return dbs
+    }
+    return []
+  },
+}
 
 /* --------------------------------- Assets --------------------------------- */
 
 export const assetsApi = {
   async list(params: ListAssetsParams = {}) {
-    const { data } = await http.get('/assets', { params });
-    return data;
+    const { data } = await http.get('/assets', { params })
+    return data
   },
-
   async getById(id: string) {
-    const { data } = await http.get<Asset>(`/assets/${id}`);
-    return data;
+    const { data } = await http.get<Asset>(`/assets/${id}`)
+    return data
   },
-
   async getSchema(id: string) {
-    const { data } = await http.get(`/assets/${id}/schema`);
-    return data;
+    const { data } = await http.get(`/assets/${id}/schema`)
+    return data
   },
-
   async getLineage(id: string) {
-    const { data } = await http.get(`/assets/${id}/lineage`);
-    return data;
+    const { data } = await http.get(`/assets/${id}/lineage`)
+    return data
   },
-
   async getProfile(id: string) {
-    const { data } = await http.get(`/assets/${id}/profile`);
-    return data;
+    const { data } = await http.get(`/assets/${id}/profile`)
+    return data
   },
-
   async getStats(id: string, period: '7d' | '30d' | '90d' = '30d') {
-    const { data } = await http.get(`/assets/${id}/stats`, { params: { period } });
-    return data;
+    const { data } = await http.get(`/assets/${id}/stats`, { params: { period } })
+    return data
   },
-
   async update(id: string, payload: Partial<Asset>) {
-    const { data } = await http.put<Asset>(`/assets/${id}`, payload);
-    return data;
+    const { data } = await http.put<Asset>(`/assets/${id}`, payload)
+    return data
   },
-
   async addTags(id: string, tags: string[]) {
-    const { data } = await http.post(`/assets/${id}/tags`, { tags });
-    return data;
+    const { data } = await http.post(`/assets/${id}/tags`, { tags })
+    return data
   },
-
   async removeTags(id: string, tags: string[]) {
-    const { data } = await http.delete(`/assets/${id}/tags`, { data: { tags } });
-    return data;
+    const { data } = await http.delete(`/assets/${id}/tags`, { data: { tags } })
+    return data
   },
-
-  async search(query: string, filters?: AssetFilters) {
-    const { data } = await http.get('/assets/search', { params: { q: query, ...filters } });
-    return data;
+  async search(query: string, filters?: AssetFiltersInput) {
+    const { data } = await http.get('/assets/search', { params: { q: query, ...filters } })
+    return data
   },
-
   async scan(id: string) {
-    const { data } = await http.post(`/assets/${id}/scan`);
-    return data;
+    const { data } = await http.post(`/assets/${id}/scan`)
+    return data
   },
-
   async updateClassification(id: string, classification: string) {
-    const { data } = await http.put(`/assets/${id}/classification`, { classification });
-    return data;
+    const { data } = await http.put(`/assets/${id}/classification`, { classification })
+    return data
   },
-};
+}
 
 /* --------------------------------- Health --------------------------------- */
 
 export const healthApi = {
   async getSystemHealth() {
-    const { data } = await http.get('/health');
-    return data;
+    const { data } = await http.get('/health')
+    return data
   },
-
   async getDataSourcesHealth() {
-    const { data } = await http.get('/health/data-sources');
-    return data;
+    const { data } = await http.get('/health/data-sources')
+    return data
   },
-
+  /**
+   * Lightweight connection check per type (dashboard convenience).
+   * If your health service expects { type, config }, adapt here.
+   */
   async testConnectionType(type: DataSourceType, config: ConnectionConfig) {
-    const res = await http.post(`/health/${type}`, config);
-    return normalizeTestResult(res.data);
+    // If your gateway expects body { type, config }, you can switch to:
+    // return normalizeTestResult((await http.post(`/health/${type}`, { type, config })).data)
+    const res = await http.post(`/health/${type}`, config)
+    return normalizeTestResult(res.data)
   },
-};
+}
 
 /* -------------------------------- Utilities ------------------------------- */
 
 export const dataSourceUtils = {
   getTypeDisplayName(type: DataSourceType): string {
-    const displayNames: Record<DataSourceType, string> = {
+    // Partial map to avoid breaking when DataSourceType has many variants
+    const displayNames: Partial<Record<DataSourceType, string>> = {
       postgresql: 'PostgreSQL',
       mysql: 'MySQL',
       mssql: 'SQL Server',
@@ -291,22 +429,35 @@ export const dataSourceUtils = {
       ftp: 'FTP/SFTP',
       elasticsearch: 'Elasticsearch',
       oracle: 'Oracle Database',
-    };
-    return displayNames[type] || type;
+    }
+    return displayNames[type] || String(type)
   },
 
   getStatusColor(status: DataSource['status']): string {
-    const colors = { active: 'green', inactive: 'gray', pending: 'yellow', error: 'red', testing: 'blue' };
-    return colors[status] || 'gray';
+    const colors: Record<string, string> = {
+      active: 'green',
+      inactive: 'gray',
+      pending: 'yellow',
+      error: 'red',
+      testing: 'blue',
+    }
+    return colors[status] || 'gray'
   },
 
   getStatusText(status: DataSource['status']): string {
-    const texts = { active: 'Active', inactive: 'Inactive', pending: 'Pending', error: 'Error', testing: 'Testing' };
-    return texts[status] || status;
+    const texts: Record<string, string> = {
+      active: 'Active',
+      inactive: 'Inactive',
+      pending: 'Pending',
+      error: 'Error',
+      testing: 'Testing',
+    }
+    return texts[status] || String(status)
   },
 
   supportsFeature(type: DataSourceType, feature: 'sync' | 'assets' | 'streaming' | 'files'): boolean {
-    const features: Record<DataSourceType, string[]> = {
+    // Partial record, tolerant to broader DataSourceType unions
+    const features: Partial<Record<DataSourceType, string[]>> = {
       postgresql: ['sync', 'assets'],
       mysql: ['sync', 'assets'],
       mssql: ['sync', 'assets'],
@@ -325,46 +476,57 @@ export const dataSourceUtils = {
       ftp: ['files'],
       elasticsearch: ['sync', 'assets'],
       oracle: ['sync', 'assets'],
-    };
-    return features[type]?.includes(feature) || false;
+    }
+    return !!features[type]?.includes(feature)
   },
 
   maskConfig(config: ConnectionConfig): ConnectionConfig {
-    const masked = { ...config };
-    const sensitive = ['password', 'apiKey', 'secretAccessKey', 'serviceAccountKey', 'accessToken'];
-    for (const k of sensitive) if (k in masked && (masked as any)[k]) (masked as any)[k] = '***masked***';
-    return masked;
+    const masked: any = { ...config }
+    const sensitive = ['password', 'apiKey', 'secretAccessKey', 'serviceAccountKey', 'accessToken', 'bearerToken']
+    for (const k of sensitive) if (k in masked && masked[k]) masked[k] = '***masked***'
+    return masked as ConnectionConfig
   },
 
   formatLastSync(lastSync?: string): string {
-    if (!lastSync) return 'Never';
-    const date = new Date(lastSync);
-    const diffMs = Date.now() - date.getTime();
-    const hours = Math.floor(diffMs / (1000 * 60 * 60));
-    const days = Math.floor(hours / 24);
-    if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
-    if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-    const minutes = Math.floor(diffMs / (1000 * 60));
-    return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+    if (!lastSync) return 'Never'
+    const date = new Date(lastSync)
+    const diffMs = Date.now() - date.getTime()
+    const hours = Math.floor(diffMs / (1000 * 60 * 60))
+    const days = Math.floor(hours / 24)
+    if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`
+    if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`
+    const minutes = Math.floor(diffMs / (1000 * 60))
+    return `${minutes} minute${minutes > 1 ? 's' : ''} ago`
   },
-};
+}
 
-/* ---------------------- Legacy named exports (compat) --------------------- */
+/* ---------------------- Named exports (compat) --------------------- */
 
 export async function listDataSources(params: ListDataSourcesParams = {}) {
-  return dataSourcesApi.list(params);
+  return dataSourcesApi.list(params)
 }
 export async function createDataSource(payload: CreateDataSourcePayload) {
-  return dataSourcesApi.create(payload);
+  return dataSourcesApi.create(payload)
 }
 export async function deleteDataSource(id: string) {
-  return dataSourcesApi.delete(id);
+  return dataSourcesApi.delete(id)
 }
 export async function testDataSource(id: string) {
-  return dataSourcesApi.test(id);
+  return dataSourcesApi.test(id)
 }
 export async function syncDataSource(id: string) {
-  return dataSourcesApi.sync(id);
+  return dataSourcesApi.sync(id)
+}
+export async function listDataSourceDatabases(id: string) {
+  return dataSourcesApi.listDatabases(id)
+}
+
+/** Optional helpers used by your wizard */
+export async function testDataSourceConfig(type: DataSourceType, config: ConnectionConfig) {
+  return dataSourcesApi.testConfig(type, config)
+}
+export async function previewDataSourceDatabases(type: DataSourceType, config: ConnectionConfig) {
+  return dataSourcesApi.previewDatabases(type, config)
 }
 
 export default {
@@ -372,4 +534,4 @@ export default {
   assets: assetsApi,
   health: healthApi,
   utils: dataSourceUtils,
-};
+}

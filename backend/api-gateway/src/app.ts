@@ -1,19 +1,15 @@
-﻿// src/app.ts
+﻿﻿// src/app.ts
 import compression from "compression";
 import cors from "cors";
 import "dotenv/config";
-import express, {
-  type NextFunction,
-  type Request,
-  type RequestHandler,
-  type Response,
-} from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import morgan from "morgan";
 import { randomUUID } from "node:crypto";
 
 import { resolveUpstreams } from "./config/upstreams.js";
+import { normalizeDataSourceBody } from "./middleware/normalizeDataSourceBody.js";
 import aiServiceProxy from "./proxy/aiServiceProxy.js";
 import authServiceProxy from "./proxy/authServiceProxy.js";
 import dataServiceProxy from "./proxy/dataServiceProxy.js";
@@ -23,7 +19,6 @@ const app = express();
 const NODE_ENV = process.env.NODE_ENV || "development";
 const isProd = NODE_ENV === "production";
 const isDev = !isProd;
-
 const bodyLimit = process.env.BODY_LIMIT || "1mb";
 const DEV_BEARER = process.env.DEV_BEARER ?? "";
 
@@ -36,19 +31,14 @@ function parseOrigins(val?: string): string[] {
 // Allow explicit env origins; in dev, default to localhost ports if none provided
 const origins = parseOrigins(
   process.env.CORS_ORIGIN ||
-    (isDev
-      ? "http://localhost:3000,http://localhost:5173,http://localhost:4173"
-      : "")
+    (isDev ? "http://localhost:3000,http://localhost:5173,http://localhost:4173" : "")
 );
 /** If no origins provided or '*' present, reflect any origin */
 const allowAll = origins.length === 0 || origins.includes("*");
 
 // ────────────────────────── App hardening & basics ──────────────────────────
 app.disable("x-powered-by");
-
-// Accept a numeric hop count or boolean "true"
-const trustProxy = process.env.TRUST_PROXY ?? (isProd ? "1" : "true");
-app.set("trust proxy", trustProxy);
+app.set("trust proxy", process.env.TRUST_PROXY ?? (isProd ? "1" : "true"));
 
 app.use(
   helmet({
@@ -64,7 +54,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
   const origin = (req.headers.origin as string) || "";
   const isAllowedOrigin = allowAll || origins.includes(origin);
-
   if (!isAllowedOrigin) return next();
 
   // Reflect origin (credentials-compatible)
@@ -105,7 +94,7 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS" || !isProd,
-}) as unknown as RequestHandler;
+}) as unknown as express.RequestHandler;
 app.use(limiter);
 
 // ─────────────────────────── Parsers & logging ──────────────────────────────
@@ -123,31 +112,54 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // ───────────────────────────── Health & debug ───────────────────────────────
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, service: "api-gateway", env: NODE_ENV })
-);
+app.get("/health", (_req, res) => res.json({ ok: true, service: "api-gateway", env: NODE_ENV }));
 app.get("/ready", (_req, res) => res.json({ ready: true }));
-app.get("/upstreams", (_req, res) =>
-  res.json({ env: NODE_ENV, upstreams: resolveUpstreams() })
-);
+app.get("/upstreams", (_req, res) => res.json({ env: NODE_ENV, upstreams: resolveUpstreams() }));
 
-// ─────────────────────────── Dev stubs (before proxies) ─────────────────────
-// NOTE: These must be registered BEFORE the proxies below.
+// ─────────────────────────── Dev stubs (must be early) ──────────────────────
 if (isDev) {
-  // Refresh endpoint stub for dev: UI posts here; we return a token
+  // Token refresh helper for local dev
   app.post("/api/auth/refresh", (_req, res) => {
     if (!DEV_BEARER) return res.status(500).json({ error: "DEV_BEARER not set" });
     const raw = DEV_BEARER.startsWith("Bearer ") ? DEV_BEARER.slice(7) : DEV_BEARER;
     return res.json({ token: raw });
   });
 
-  // Optional: AI health stub so UI stops 502’ing when ai-service is down
+  // Local AI health stub so the UI has something to ping
   app.get("/api/ai/health", (_req, res) => {
     res.json({ status: "ok", stub: true });
   });
+
+  // Frontend expectations (permissions/current user)
+  app.get(["/api/auth/me", "/auth/me"], (_req, res) => {
+    res.json({
+      id: "dev-user-1",
+      email: "dev@example.com",
+      name: "Dev User",
+      roles: ["admin"],
+      permissions: [
+        "datasources:read",
+        "datasources:write",
+        "catalog:read",
+        "requests:read",
+      ],
+    });
+  });
+
+  app.get(["/api/user/permissions", "/user/permissions"], (_req, res) => {
+    res.json({
+      success: true,
+      data: [
+        "datasources:read",
+        "datasources:write",
+        "catalog:read",
+        "requests:read",
+      ],
+      timestamp: new Date().toISOString(),
+    });
+  });
 }
 
-// ───────────────────────── Dev bearer injection block ───────────────────────
 // In dev, if no Authorization header, attach DEV_BEARER (do not overwrite a real one)
 if (isDev) {
   app.use(["/api", "/api/ai", "/api/auth"], (req, _res, next) => {
@@ -160,13 +172,29 @@ if (isDev) {
   });
 }
 
+app.use(
+  [
+    "/api/data-sources/test",
+    "/api/data-sources/databases/preview",
+    "/api/data-sources",               // create/update routes from the UI
+  ],
+  express.json({ limit: bodyLimit }),  // ensure JSON parser runs here too
+  normalizeDataSourceBody
+);
+
+// Proxies (order matters)
+app.use("/api/ai",   aiServiceProxy);
+app.use("/api/auth", authServiceProxy);
+app.use("/api",      dataServiceProxy);
+
+
 // ──────────────────────────────── Proxies ───────────────────────────────────
-// IMPORTANT: Do NOT strip the /api prefix when forwarding to the data-service.
-// The data-service mounts its routes under /api/* (e.g., /api/data-sources).
-// Order matters: specific first.
-app.use("/api/ai", aiServiceProxy);     // rewrites ^/api/ai → /api on upstream (see file)
-app.use("/api/auth", authServiceProxy); // rewrites ^/api/auth → /auth on upstream (see file)
-app.use("/api", dataServiceProxy);      // forwards /api/* intact to data-service
+// NOTE: Our data proxy STRIPS the '^/api' prefix, so the upstream sees bare routes.
+// The data-service also mounts '/api/*' internally for flexibility, but the gateway
+// forwards '/api/*' and removes the prefix at the proxy layer. Order matters: specific first.
+app.use("/api/ai",   aiServiceProxy);     // rewrites ^/api/ai → /api on upstream
+app.use("/api/auth", authServiceProxy);   // rewrites ^/api/auth → /auth on upstream (health → /health)
+app.use("/api",      dataServiceProxy);   // strips '^/api' so upstream sees '/data-sources', etc.
 
 // ───────────────────────────── 404 + error handling ─────────────────────────
 app.use((req, res) => {
@@ -182,8 +210,7 @@ app.use((req, res) => {
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   const status = err.status || err.statusCode || 500;
   const code = err.code || "INTERNAL_SERVER_ERROR";
-  const publicMessage =
-    isProd ? err.publicMessage || "Internal server error" : err.message || "Internal server error";
+  const publicMessage = isProd ? err.publicMessage || "Internal server error" : err.message || "Internal server error";
 
   if (!res.headersSent) {
     res.status(status).json({

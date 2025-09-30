@@ -1,0 +1,97 @@
+openapi: 3.0.3
+info: { title: CWIC Data Catalog, version: "1.0.0" }
+servers: [{ url: /api }]
+paths:
+  /catalog/assets:
+    get:
+      summary: List assets
+      parameters:
+        - { in: query, name: search, schema: { type: string } }
+        - {
+            in: query,
+            name: type,
+            schema:
+              {
+                type: string,
+                enum: [table, view, file, api, dashboard, report],
+              },
+          }
+        - { in: query, name: owner, schema: { type: string } }
+        - {
+            in: query,
+            name: quality,
+            schema: { type: string, enum: [high, medium, low] },
+          }
+        - {
+            in: query,
+            name: classification,
+            schema:
+              {
+                type: string,
+                enum: [public, internal, confidential, restricted],
+              },
+          }
+        - {
+            in: query,
+            name: dataSourceId,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            in: query,
+            name: tags,
+            schema: { type: string, description: "Comma-separated" },
+          }
+        - {
+            in: query,
+            name: sortBy,
+            schema:
+              {
+                type: string,
+                enum: [name, updatedAt, createdAt, quality, owner],
+              },
+          }
+        - {
+            in: query,
+            name: sortOrder,
+            schema: { type: string, enum: [asc, desc], default: asc },
+          }
+        - {
+            in: query,
+            name: page,
+            schema: { type: integer, minimum: 1, default: 1 },
+          }
+        - {
+            in: query,
+            name: limit,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+      responses: { "200": { description: OK } }
+  /catalog/assets/{id}:
+    get:
+      {
+        summary: Get asset details,
+        parameters:
+          [{ in: path, name: id, required: true, schema: { type: string } }],
+        responses: { "200": { description: OK } },
+      }
+  /catalog/metrics:
+    get:
+      {
+        summary: Catalog summary metrics,
+        responses: { "200": { description: OK } },
+      }
+  /data-sources/{id}/sync:
+    post:
+      {
+        summary: Trigger sync,
+        parameters:
+          [
+            {
+              in: path,
+              name: id,
+              required: true,
+              schema: { type: string, format: uuid },
+            },
+          ],
+        responses: { "202": { description: Accepted } },
+      }

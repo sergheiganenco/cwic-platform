@@ -1,36 +1,19 @@
-# Node
-node_modules/
+﻿node_modules/
 dist/
 build/
-
-# Frontend caches
 .vite/
-.next/
-out/
-
-# Python
-venv/
-__pycache__/
-*.pyc
-
-# Env files
-.env
-*.env.local
-.env.development*
-.env.production*
-.env.test*
-
-# Logs
-logs/
+.cache/
+.temp/
+coverage/
 *.log
-
-# OS/IDE
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/
-
-# local env
 .env
-.env.*
-
+.env.*.local
+.env.local
+.vscode/*
+!.vscode/extensions.json
+.idea/

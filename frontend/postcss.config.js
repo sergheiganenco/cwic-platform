@@ -1,7 +1,7 @@
-﻿// ESM version (works with "type": "module")
+﻿// postcss.config.js
 export default {
   plugins: {
     tailwindcss: {},
     autoprefixer: {},
   },
-};
+}

@@ -1,11 +1,19 @@
-﻿FROM node:20-alpine
+﻿# backend/data-service/Dockerfile.dev
+FROM node:20-alpine
 WORKDIR /app
-RUN apk add --no-cache curl
+
+# 1) copy manifests first
 COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+# 2) lockfile-aware install (only use npm ci when lockfileVersion exists)
+RUN if [ -s package-lock.json ] && grep -q '"lockfileVersion"' package-lock.json; then \
+    npm ci --no-audit --no-fund; \
+    else \
+    echo "No valid package-lock.json → using npm install"; \
+    npm install --no-audit --no-fund; \
+    fi
+
+# 3) app files
 COPY . .
-USER node
 EXPOSE 3002
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:3002/health || exit 1
 CMD ["npm","run","dev"]

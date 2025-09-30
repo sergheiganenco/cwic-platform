@@ -8,18 +8,39 @@
     "backend/*"
   ],
   "scripts": {
-    "dev": "./scripts/development/start-dev.sh",
-    "build": "./scripts/development/build.sh",
-    "test": "./scripts/development/test.sh",
-    "lint": "./scripts/development/lint.sh",
-    "setup": "./scripts/setup/init-project.sh",
-    "deploy:staging": "./scripts/deployment/deploy-staging.sh",
-    "deploy:prod": "./scripts/deployment/deploy-production.sh",
+    "dev": "npm run dev:all",
+    "build": "npm run build:all",
+    "lint": "npm run lint:all",
+    "lint:fix": "npm run lint:fix:all",
+    "typecheck": "npm run typecheck:all",
+    "format": "npm run format:all",
+    "format:fix": "npm run format:fix:all",
+
+
+    "dev:all": "concurrently -c auto -n FRONTEND,BACKEND \"npm run -w frontend dev\" \"npm run -ws backend --if-present dev\"",
+    "build:all": "npm run -w frontend build && npm run -ws backend --if-present build",
+    "lint:all": "npm run -w frontend lint && npm run -ws backend --if-present lint",
+    "lint:fix:all": "npm run -w frontend lint:fix && npm run -ws backend --if-present lint:fix",
+    "typecheck:all": "npm run -w frontend typecheck && npm run -ws backend --if-present typecheck",
+    "format:all": "npm run -w frontend format && npm run -ws backend --if-present format",
+    "format:fix:all": "npm run -w frontend format:fix && npm run -ws backend --if-present format:fix",
+    "dev:frontend": "npm run -w frontend dev",
+    "build:frontend": "npm run -w frontend build",
+    "lint:frontend": "npm run -w frontend lint",
+    "typecheck:frontend": "npm run -w frontend typecheck",
+
+    "dev:backend": "npm run -ws backend --if-present dev",
+    "build:backend": "npm run -ws backend --if-present build",
+    "lint:backend": "npm run -ws backend --if-present lint",
+    "typecheck:backend": "npm run -ws backend --if-present typecheck",
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down",
-    "db:migrate": "./scripts/database/migrate.sh",
-    "db:seed": "./scripts/database/seed.sh",
-    "clean": "./scripts/maintenance/cleanup.sh"
+    "db:migrate": "npm run -ws backend --if-present db:migrate",
+    "db:seed": "npm run -ws backend --if-present db:seed",
+    "deploy:staging": "npm run -ws backend --if-present deploy:staging",
+    "deploy:prod": "npm run -ws backend --if-present deploy:prod",
+    "setup": "npm run -ws --if-present setup",
+    "clean": "npm run -ws --if-present clean"
   },
   "keywords": [
     "data-governance",
@@ -33,8 +54,19 @@
   "devDependencies": {
     "@types/express": "^4.17.23",
     "@types/express-serve-static-core": "^4.19.6",
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
     "concurrently": "^8.2.0",
     "cross-env": "^7.0.3",
-    "cross-env-shell": "^7.0.3"
+    "cross-env-shell": "^7.0.3",
+    "eslint": "^8.57.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  },
+  "dependencies": {
+    "bullmq": "^5.58.5",
+    "ioredis": "^5.7.0"
   }
 }

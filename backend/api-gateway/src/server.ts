@@ -1,46 +1,38 @@
 ﻿// src/server.ts
-import "dotenv/config";
+import http from "node:http";
+import process from "node:process";
 import app from "./app.js";
 
-const PORT = Number(process.env.PORT ?? 8000);
-const HOST = process.env.HOST ?? "0.0.0.0";
+const PORT = Number(process.env.PORT || 8000);
+const HOST = process.env.HOST || "0.0.0.0";
 
-const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:3002";
-const AI_SERVICE_URL = process.env.AI_SERVICE_URL ?? "http://localhost:8003";
+const server = http.createServer(app);
+server.keepAliveTimeout = 75_000;
+server.headersTimeout = 90_000;
 
-const server = app.listen(PORT, HOST, () => {
-  console.log(`🚀 API Gateway listening on ${HOST}:${PORT}`);
-  console.log(`📊 Health:           http://localhost:${PORT}/health`);
-  console.log(`🔄 Proxy /api/*  →   ${DATA_SERVICE_URL}`);
-  console.log(`🤖 Proxy /api/ai/* → ${AI_SERVICE_URL}`);
-});
+const log = (...a: unknown[]) => console.log("[api-gateway]", ...a);
+const err = (...a: unknown[]) => console.error("[api-gateway]", ...a);
 
-function shutdown(signal: string) {
-  console.log(`[gateway] ${signal} received → closing server...`);
-  server.close((err?: Error) => {
-    if (err) {
-      console.error("[gateway] Error during close:", err);
-      process.exit(1);
-    }
-    console.log("[gateway] Closed cleanly.");
+server
+  .listen(PORT, HOST, () => {
+    log(`listening on http://${HOST}:${PORT}`);
+  })
+  .on("error", (e: NodeJS.ErrnoException) => {
+    if (e.code === "EADDRINUSE") err(`port ${PORT} already in use`);
+    else if (e.code === "EACCES") err(`no permission to bind ${HOST}:${PORT}`);
+    else err("server error:", e);
+    setTimeout(() => process.exit(1), 1000);
+  });
+
+process.on("uncaughtException", (e) => err("uncaughtException:", e));
+process.on("unhandledRejection", (r) => err("unhandledRejection:", r as any));
+
+const shutdown = (signal: NodeJS.Signals) => {
+  log(`${signal} received → closing server...`);
+  server.close((closeErr) => {
+    if (closeErr) err("error during close:", closeErr);
     process.exit(0);
   });
-  // Force-exit if something hangs (open sockets, etc.)
-  setTimeout(() => {
-    console.warn("[gateway] Forced shutdown after 10s");
-    process.exit(1);
-  }, 10_000).unref();
-}
-
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("unhandledRejection", (reason) => {
-  console.error("[gateway] Unhandled Rejection:", reason);
-});
-process.on("uncaughtException", (err) => {
-  console.error("[gateway] Uncaught Exception:", err);
-  // In prod you may decide to exit(1); keeping alive here for dev.
-  // if (process.env.NODE_ENV === "production") process.exit(1);
-});
-
-export default server;
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

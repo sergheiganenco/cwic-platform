@@ -1,27 +1,37 @@
+// backend/data-service/src/routes/dataSources.ts
 import { Router, type RequestHandler } from 'express';
 import { body, param, query } from 'express-validator';
+
 import { DataSourceController } from '../controllers/DataSourceController';
 import { authMiddleware } from '../middleware/auth';
 import { asyncHandler } from '../middleware/error';
 import { createRateLimit } from '../middleware/rateLimit';
 import { validateRequest } from '../middleware/validation';
 
-// Use this ONE router file. Delete/ignore DataSources.routes.ts.
+// Single router file for data sources
 const router = Router();
 const ctrl = new DataSourceController();
-
 const asHandler = (h: any) => h as unknown as RequestHandler;
+
 const IS_PROD = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 
-/** Type normalizers (inputs -> canonical) */
+/* -------------------------------------------------------------------------- */
+/* Type & status normalization                                                */
+/* -------------------------------------------------------------------------- */
+
 const CANONICAL_TYPES = [
   'postgresql','mysql','mssql','oracle','mongodb','redis',
   's3','azure-blob','gcs','snowflake','bigquery','redshift',
   'databricks','api','file','kafka','elasticsearch',
 ] as const;
+
 type CanonicalType = (typeof CANONICAL_TYPES)[number];
 
-const INPUT_TYPES = new Set<string>([...CANONICAL_TYPES, 'postgres']);
+const INPUT_TYPES = new Set<string>([...CANONICAL_TYPES, 'postgres']); // accept "postgres"
+const INPUT_STATUSES = new Set<string>([
+  'active','inactive','pending','error','testing','connected','disconnected','warning','syncing',
+]);
+
 const normalizeType = (t?: string): CanonicalType | undefined => {
   if (!t) return undefined;
   const x = t.toLowerCase();
@@ -31,12 +41,8 @@ const normalizeType = (t?: string): CanonicalType | undefined => {
     : undefined;
 };
 
-const INPUT_STATUSES = new Set<string>([
-  'active','inactive','pending','error','testing','connected','disconnected','warning','syncing',
-]);
-
-/** Sort keys we allow from the UI */
 const ALLOWED_SORT_BY = new Set(['updatedAt','createdAt','name','status','type'] as const);
+
 const normalizeListParams: RequestHandler = (req, _res, next) => {
   // pagination
   const page = Math.max(parseInt(String(req.query.page ?? '1'), 10) || 1, 1);
@@ -65,18 +71,64 @@ const normalizeListParams: RequestHandler = (req, _res, next) => {
   next();
 };
 
-// Rate limits
+/* -------------------------------------------------------------------------- */
+/* Rate limits                                                                */
+/* -------------------------------------------------------------------------- */
+
 const listLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 100 }));
 const healthLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 60  }));
 const getByIdLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 200 }));
 const schemaLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 30  }));
 const createLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 20  }));
-const testLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 10  }));
-const syncLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 5   }));
+const testLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 60  })); // ↑ allow wizard to click often
+const syncLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 15  }));
 const updateLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 30  }));
 const deleteLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 10  }));
 
-// Validation
+/* -------------------------------------------------------------------------- */
+/* Validation                                                                 */
+/* -------------------------------------------------------------------------- */
+
+// Fixed validator that accepts both 'config' and 'connection' (API Gateway transforms field names)
+const validateConnectionConfig = () => {
+  return body().custom((value, { req }) => {
+    // Log what we're receiving for debugging
+    console.log('🔍 Full request body received:', JSON.stringify(req.body, null, 2));
+    
+    // API Gateway transforms 'config' to 'connection', so we check both
+    const config = req.body?.config || req.body?.connection;
+    
+    console.log('🔍 Backend validating config/connection:', JSON.stringify(config, null, 2));
+    console.log('🔍 Config type:', typeof config);
+    console.log('🔍 Config is array:', Array.isArray(config));
+    console.log('🔍 Config is null:', config === null);
+    
+    // Basic checks
+    if (config === undefined) {
+      console.log('❌ Config/connection is undefined');
+      throw new Error('Connection config is required');
+    }
+    
+    if (config === null) {
+      console.log('❌ Config/connection is null');
+      throw new Error('Connection config cannot be null');
+    }
+    
+    if (typeof config !== 'object') {
+      console.log('❌ Config/connection is not an object, type:', typeof config);
+      throw new Error('Connection config must be an object');
+    }
+    
+    if (Array.isArray(config)) {
+      console.log('❌ Config/connection is an array');
+      throw new Error('Connection config cannot be an array');
+    }
+    
+    console.log('✅ Connection config validation passed');
+    return true;
+  });
+};
+
 const paginationValidation = [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 100 }),
@@ -96,7 +148,12 @@ const createDataSourceValidation = [
   body('type').isString()
     .custom((val) => INPUT_TYPES.has(String(val).toLowerCase()))
     .customSanitizer((val) => normalizeType(String(val))),
-  body('connectionConfig').isObject(),
+  body('connectionConfig').custom((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Connection config must be a valid object');
+    }
+    return true;
+  }),
   body('tags').optional().isArray(),
   body('metadata').optional().isObject(),
 ];
@@ -108,12 +165,20 @@ const updateDataSourceValidation = [
   body('type').optional().isString()
     .custom((val) => INPUT_TYPES.has(String(val).toLowerCase()))
     .customSanitizer((val) => normalizeType(String(val))),
-  body('connectionConfig').optional().isObject(),
+  body('connectionConfig').optional().custom((value) => {
+    if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
+      throw new Error('Connection config must be a valid object');
+    }
+    return true;
+  }),
   body('tags').optional().isArray(),
   body('metadata').optional().isObject(),
 ];
 
-/** Guard: in dev accept SKIP_AUTH=true or header X-Dev-Auth: 1 */
+/* -------------------------------------------------------------------------- */
+/* Auth guard                                                                 */
+/* -------------------------------------------------------------------------- */
+
 const guard: RequestHandler = (req, res, next) => {
   const devBypass =
     !IS_PROD &&
@@ -126,7 +191,12 @@ const guard: RequestHandler = (req, res, next) => {
   return authMiddleware(req, res, next);
 };
 
-/** ROUTES (relative!) — app.ts adds the /api/data-sources & /data-sources prefixes */
+/* -------------------------------------------------------------------------- */
+/* Routes                                                                     */
+/* (Note: the app mounts this router at /api/data-sources)                    */
+/* -------------------------------------------------------------------------- */
+
+// List + summary
 router.get(
   '/',
   guard,
@@ -136,18 +206,47 @@ router.get(
   listLimit,
   asyncHandler(ctrl.getAllDataSources),
 );
-
 router.get('/health', guard, healthLimit, asyncHandler(ctrl.getHealthSummary));
 
+// CRUD
 router.get('/:id', guard, idValidation, validateRequest, getByIdLimit, asyncHandler(ctrl.getDataSourceById));
 router.get('/:id/schema', guard, idValidation, validateRequest, schemaLimit, asyncHandler(ctrl.getDataSourceSchema));
-
 router.post('/', guard, createDataSourceValidation, validateRequest, createLimit, asyncHandler(ctrl.createDataSource));
 router.put('/:id', guard, updateDataSourceValidation, validateRequest, updateLimit, asyncHandler(ctrl.updateDataSource));
 router.delete('/:id', guard, idValidation, validateRequest, deleteLimit, asyncHandler(ctrl.deleteDataSource));
 
+/* ------------------------- Wizard-specific endpoints ---------------------- */
+// Test a raw config BEFORE create
+router.post(
+  '/test',
+  guard,
+  body('type').isString().custom((v) => INPUT_TYPES.has(String(v).toLowerCase()))
+    .customSanitizer((v) => normalizeType(String(v))),
+  validateConnectionConfig(),
+  validateRequest,
+  testLimit,
+  asyncHandler(ctrl.testConfig),
+);
+
+// Preview discovered DBs from a raw config BEFORE create
+router.post(
+  '/databases/preview',
+  guard,
+  body('type').isString().custom((v) => INPUT_TYPES.has(String(v).toLowerCase()))
+    .customSanitizer((v) => normalizeType(String(v))),
+  validateConnectionConfig(),
+  validateRequest,
+  listLimit,
+  asyncHandler(ctrl.previewDatabases),
+);
+
+/* ------------------------- Saved-source operations ------------------------ */
+// Connection test for a saved source
 router.post('/:id/test', guard, idValidation, validateRequest, testLimit, asyncHandler(ctrl.testConnection));
-router.post('/:id/sync',
+
+// Trigger sync/discovery for a saved source
+router.post(
+  '/:id/sync',
   guard,
   idValidation,
   body('force').optional().isBoolean(),
@@ -155,5 +254,11 @@ router.post('/:id/sync',
   syncLimit,
   asyncHandler(ctrl.syncDataSource),
 );
+
+// Optional: poll sync status (frontend can use this if needed)
+router.get('/:id/sync/status', guard, idValidation, validateRequest, listLimit, asyncHandler(ctrl.getSyncStatus));
+
+// List databases belonging to a saved source (used by "Browse Databases")
+router.get('/:id/databases', guard, idValidation, validateRequest, listLimit, asyncHandler(ctrl.listDatabases));
 
 export default router;

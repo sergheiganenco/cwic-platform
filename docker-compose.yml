@@ -39,9 +39,9 @@ services:
     environment:
       NODE_ENV: development
       PORT: 8000
-      DATA_SERVICE_URL: http://data-service:3002   # resolvable on the same network
+      DATA_SERVICE_URL: http://data-service:3002
       AI_SERVICE_URL: http://ai-service:3003
-      AUTH_SERVICE_URL: http://auth-service:8001
+      AUTH_SERVICE_URL: http://auth-service:3001        # <— was 8001
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
       DEV_BEARER: ${DEV_BEARER}
       NO_PROXY: "localhost,127.0.0.1,api-gateway,data-service,ai-service,auth-service,pipeline-service,notification-service,integration-service,db,redis"
@@ -53,6 +53,8 @@ services:
       data-service:
         condition: service_healthy
       ai-service:
+        condition: service_healthy
+      auth-service:                                   # <— ensure auth is up before gateway proxies to it
         condition: service_healthy
     healthcheck:
       test:
@@ -67,22 +69,22 @@ services:
     networks:
       - cwic-network
 
-
   # ---------- AUTH SERVICE ----------
   auth-service:
     build:
       context: ./backend/auth-service
       dockerfile: Dockerfile
     ports:
-      - "8001:8001"
+      - "3001:3001"                                   # <— expose 3001 not 8001
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
-      PORT: 8001
+      PORT: 3001                                      # <— listen on 3001
       DATABASE_URL: postgresql://${DB_USER:-cwic_user}:${DB_PASSWORD:-cwic_secure_pass}@db:5432/${DB_NAME:-cwic_platform}
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: devsecret
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      CORS_ORIGIN: http://localhost:5173,http://localhost:3000
     depends_on:
       db:
         condition: service_healthy
@@ -95,19 +97,18 @@ services:
       test:
         [
           "CMD-SHELL",
-          "node -e \"require('http').get('http://127.0.0.1:8001/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+          "node -e \"require('http').get('http://127.0.0.1:3001/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
         ]
       interval: 30s
       timeout: 10s
       retries: 3
 
   # ---------- DATA SERVICE ----------
-  # ---------- DATA SERVICE ----------
   data-service:
     build:
       context: ./backend/data-service
       dockerfile: Dockerfile.dev
-    command: ["npm","run","dev"]         # <<< keep this
+    command: ["npm","run","dev"]
     ports: ["3002:3002"]
     environment:
       NODE_ENV: development
@@ -118,9 +119,9 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://cwic_user:cwic_secure_pass@db:5432/cwic_platform}
       ENABLE_FILE_LOGGING: "false"
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
-      # Windows/WSL file watching (optional but helpful)
       CHOKIDAR_USEPOLLING: "1"
       CHOKIDAR_INTERVAL: "300"
+      REDIS_URL: redis://redis:6379/0                 # <— add /0 for consistency
     volumes:
       - ./backend/data-service:/app
       - /app/node_modules
@@ -133,12 +134,10 @@ services:
       timeout: 3s
       start_period: 15s
       retries: 3
-    networks:               
+    networks:
       - cwic-network
 
-
-    # ---------- AI SERVICE ----------
-
+  # ---------- AI SERVICE ----------
   ai-service:
     build:
       context: ./backend/ai-service
@@ -164,7 +163,6 @@ services:
       retries: 3
     networks:
       - cwic-network
-
 
   # ---------- PIPELINE SERVICE ----------
   pipeline-service:

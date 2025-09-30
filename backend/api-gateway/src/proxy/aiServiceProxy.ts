@@ -1,86 +1,69 @@
-// backend/api-gateway/src/proxy/aiServiceProxy.ts
-import type { Request, Response } from "express";
+// src/proxy/aiServiceProxy.ts
+import type { IncomingMessage, ServerResponse } from "http";
 import { createProxyMiddleware, type Options } from "http-proxy-middleware";
-import type { Socket } from "node:net";
 import { resolveUpstreams } from "../config/upstreams.js";
+import {
+  isDev,
+  maybeAttachDevAuth,
+  propagateCommon,
+  reflectCors,
+  writeBodyIfAny
+} from "./shared.js";
 
 const { aiService: target } = resolveUpstreams();
-const isDev = process.env.NODE_ENV !== "production";
-const devBearer = process.env.DEV_BEARER ?? "";
 
-/**
- * Mount path: /api/ai
- * Upstream exposes /api/* → trim the /api/ai prefix down to /api
- *   req.url:          '/health'
- *   originalUrl:      '/api/ai/health'
- *   proxied path ->   '/api/health'
- */
-const options: Options<Request, Response> = {
+/** Mounted at /api/ai → upstream wants /api/* */
+const options: Options<IncomingMessage, ServerResponse> = {
   target,
   changeOrigin: true,
   xfwd: true,
   secure: !isDev,
   proxyTimeout: 30_000,
   timeout: 30_000,
-  pathRewrite: (_path, req) => `/api${req.url}`,
+  pathRewrite: { "^/api/ai": "/api" },
 
   on: {
-    proxyReq: (proxyReq: any, req: Request) => {
-      if (isDev && devBearer && !req.headers.authorization) {
-        proxyReq.setHeader(
-          "authorization",
-          devBearer.startsWith("Bearer ") ? devBearer : `Bearer ${devBearer}`
-        );
-        proxyReq.setHeader("x-dev-auth", "gateway");
-      } else if (req.headers.authorization) {
-        proxyReq.setHeader("authorization", req.headers.authorization);
-      }
-
-      const rid = (req.headers["x-request-id"] as string) || "";
-      if (rid) proxyReq.setHeader("x-request-id", rid);
-
+    proxyReq: (proxyReq, req) => {
+      maybeAttachDevAuth(proxyReq, req);
+      propagateCommon(proxyReq, req);
+      writeBodyIfAny(proxyReq, req);
       if (isDev) {
+        const url = (proxyReq as any).path || "";
         // eslint-disable-next-line no-console
-        console.debug(
-          `[proxy→ai] ${req.method} ${req.originalUrl} → ${target}/api${req.url}`
-        );
+        console.debug(`[proxy→ai] ${req.method} ${(req as any).url} → ${target}${url}`);
       }
     },
-
-    proxyRes: (proxyRes, req: Request) => {
-      const origin = req.headers.origin as string | undefined;
-      if (origin) {
-        proxyRes.headers["access-control-allow-origin"] = origin;
-        proxyRes.headers["access-control-allow-credentials"] = "true";
-      }
+    proxyRes: (proxyRes, req) => {
+      reflectCors(proxyRes as unknown as ServerResponse, req);
       if (isDev) {
         // eslint-disable-next-line no-console
-        console.debug(
-          `[proxy→ai] ${req.method} ${req.originalUrl} ⇐ ${proxyRes.statusCode}`
-        );
+        console.debug(`[proxy→ai] ${req.method} ${(req as any).url} ⇐ ${proxyRes.statusCode}`);
       }
     },
-
-    error: (err: Error, req: Request, res: Response | Socket) => {
-      if (typeof (res as Socket).destroy === "function" && !(res as any).setHeader) {
-        try {
-          (res as Socket).destroy();
-        } catch {}
+    error: (err, req, res) => {
+      if (typeof (res as any).destroy === "function" && !(res as any).setHeader) {
+        try { (res as any).destroy(); } catch {}
         return;
       }
-      const r = res as Response;
-      if (!r.headersSent) {
-        r.status(502).json({
-          success: false,
-          error: "AI_SERVICE_UNAVAILABLE",
-          message: "AI service is currently unavailable",
-          details: err.message,
-          upstream: target,
-          timestamp: new Date().toISOString(),
-        });
+      const r = res as unknown as ServerResponse & { headersSent?: boolean };
+      if ((r as any).headersSent) return;
+      const origin = req.headers["origin"] as string | undefined;
+      if (origin) {
+        (r as any).setHeader?.("Access-Control-Allow-Origin", origin);
+        (r as any).setHeader?.("Access-Control-Allow-Credentials", "true");
       }
-    },
-  },
+      (r as any).statusCode = 502;
+      (r as any).setHeader?.("content-type", "application/json; charset=utf-8");
+      (r as any).end(JSON.stringify({
+        success: false,
+        error: "AI_SERVICE_UNAVAILABLE",
+        message: "AI service is currently unavailable",
+        details: err.message,
+        upstream: target,
+        timestamp: new Date().toISOString()
+      }));
+    }
+  }
 };
 
-export default createProxyMiddleware(options);
+export default createProxyMiddleware<IncomingMessage, ServerResponse>(options);

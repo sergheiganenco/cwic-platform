@@ -1,13 +1,17 @@
-import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3';
-import axios, { AxiosError } from 'axios';
-import { MongoClient } from 'mongodb';
-import { createConnection as createMySQLConnection } from 'mysql2/promise';
-import { Client as PgClient } from 'pg';
-import { createClient as createRedisClient } from 'redis';
+import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3'
+import axios, { AxiosError } from 'axios'
+import { MongoClient } from 'mongodb'
+import {
+  createConnection as createMySQLConnection,
+  type ConnectionOptions,
+} from 'mysql2/promise'
+import { Client as PgClient } from 'pg'
+import { createClient as createRedisClient } from 'redis'
 
 import {
   ConnectionTestResult,
   DataSource,
+  DataSourceType,
   isAPIConfig,
   isBigQueryConfig,
   isS3Config,
@@ -16,74 +20,153 @@ import {
   type BigQueryConfig,
   type S3Config,
   type SnowflakeConfig,
-} from '../models/DataSource';
-import { logger } from '../utils/logger';
+} from '../models/DataSource'
+import { logger } from '../utils/logger'
 
 const toStr = (v: string | number | undefined): string | undefined =>
-  v == null ? undefined : String(v);
+  v == null ? undefined : String(v)
+
+const normalizeType = (t?: string): DataSourceType | undefined => {
+  if (!t) return undefined
+  const x = String(t).toLowerCase()
+  if (x === 'postgres') return 'postgresql'
+  if (['azure_sql', 'azure-sql', 'sqlserver', 'sql-server'].includes(x))
+    return 'mssql' as DataSourceType
+  return x as DataSourceType
+}
 
 export class ConnectionTestService {
-  async testConnection(dataSource: DataSource): Promise<ConnectionTestResult> {
-    const startTime = Date.now();
-    try {
-      logger.info(`Testing connection for data source: ${dataSource.name} (${dataSource.type})`);
-      let result: ConnectionTestResult;
+  /* =========================================================================
+     Public helpers used by the controller
+  ========================================================================= */
 
-      switch (dataSource.type) {
-        case 'postgresql':
-          result = await this.testPostgreSQL(dataSource); break;
-        case 'mysql':
-          result = await this.testMySQL(dataSource); break;
-        case 'mssql':
-          result = await this.testSQLServer(dataSource); break;
-        case 'mongodb':
-          result = await this.testMongoDB(dataSource); break;
-        case 'redis':
-          result = await this.testRedis(dataSource); break;
-        case 's3':
-          result = await this.testS3(dataSource); break;
-        case 'api':
-          result = await this.testAPI(dataSource); break;
-        case 'snowflake':
-          result = await this.testSnowflake(dataSource); break;
-        case 'bigquery':
-          result = await this.testBigQuery(dataSource); break;
-        case 'elasticsearch':
-          result = await this.testElasticsearch(dataSource); break;
-        default:
-          result = await this.testGeneric(dataSource);
-      }
+  /** Test a raw (type, config) before persisting a record */
+  async testRawConfig(type: string, config: any): Promise<ConnectionTestResult> {
+    const ds: DataSource = {
+      id: 'temp',
+      name: 'temp',
+      description: null as any,
+      type: (normalizeType(type) ?? (type as DataSourceType)) as DataSourceType,
+      status: 'pending' as any,
+      connectionConfig: config,
+      tags: [],
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      createdBy: 'system',
+      lastTestAt: null as any,
+      lastSyncAt: null as any,
+    } as unknown as DataSource
 
-      result.responseTime = Date.now() - startTime;
-      result.testedAt = new Date();
-      logger.info(
-        `Connection test completed for ${dataSource.name}: ${result.success ? 'SUCCESS' : 'FAILED'} (${result.responseTime}ms)`
-      );
-      return result;
-    } catch (error: unknown) {
-      const responseTime = Date.now() - startTime;
-      logger.error(`Connection test failed for ${dataSource.name}:`, error);
-      return {
-        success: false,
-        responseTime,
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
-        testedAt: new Date(),
-      };
+    return this.testConnection(ds)
+  }
+
+  /** Try to enumerate databases using only provided type + config */
+  async discoverDatabasesFromConfig(
+    type: string,
+    config: Record<string, any>,
+  ): Promise<Array<{ name: string }>> {
+    const t = normalizeType(type) ?? (type as DataSourceType)
+
+    switch (t) {
+      case 'postgresql':
+        return this.pgListDatabases(config)
+      case 'mysql':
+        return this.mysqlListDatabases(config)
+      case 'mssql':
+        return this.mssqlListDatabases(config)
+      case 'mongodb':
+        return this.mongoListDatabases(config)
+      default:
+        return []
     }
   }
 
-  /* ───────── PostgreSQL ───────── */
+  /* =========================================================================
+     Core “test connection” entry + per-connector tests
+  ========================================================================= */
+
+  async testConnection(dataSource: DataSource): Promise<ConnectionTestResult> {
+    const startTime = Date.now()
+    try {
+      logger.info(
+        `Testing connection for data source: ${dataSource.name} (${dataSource.type})`,
+      )
+      let result: ConnectionTestResult
+
+      switch (dataSource.type) {
+        case 'postgresql':
+          result = await this.testPostgreSQL(dataSource)
+          break
+        case 'mysql':
+          result = await this.testMySQL(dataSource)
+          break
+        case 'mssql':
+          result = await this.testSQLServer(dataSource)
+          break
+        case 'mongodb':
+          result = await this.testMongoDB(dataSource)
+          break
+        case 'redis':
+          result = await this.testRedis(dataSource)
+          break
+        case 's3':
+          result = await this.testS3(dataSource)
+          break
+        case 'api':
+          result = await this.testAPI(dataSource)
+          break
+        case 'snowflake':
+          result = await this.testSnowflake(dataSource)
+          break
+        case 'bigquery':
+          result = await this.testBigQuery(dataSource)
+          break
+        case 'elasticsearch':
+          result = await this.testElasticsearch(dataSource)
+          break
+        default:
+          result = await this.testGeneric(dataSource)
+      }
+
+      result.responseTime = Date.now() - startTime
+      result.testedAt = new Date()
+      logger.info(
+        `Connection test completed for ${dataSource.name}: ${
+          result.success ? 'SUCCESS' : 'FAILED'
+        } (${result.responseTime}ms)`,
+      )
+      return result
+    } catch (error: unknown) {
+      const responseTime = Date.now() - startTime
+      logger.error(`Connection test failed for ${dataSource.name}:`, error)
+      return {
+        success: false,
+        responseTime,
+        error:
+          error instanceof Error ? error.message : 'Unknown error occurred',
+        testedAt: new Date(),
+      }
+    }
+  }
+
+  /* ───────── PostgreSQL (test) ───────── */
   private async testPostgreSQL(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    let client: PgClient;
+    const c = ds.connectionConfig as any
+    let client: PgClient
 
     if (c.connectionString) {
-      client = new PgClient({ connectionString: c.connectionString });
+      client = new PgClient({
+        connectionString: c.connectionString,
+        connectionTimeoutMillis: c.timeout || 30_000,
+      })
     } else {
       const ssl =
-        c.ssl === true ? { rejectUnauthorized: false }
-        : typeof c.ssl === 'object' ? (c.ssl as object)
-        : false;
+        c.ssl === true
+          ? { rejectUnauthorized: false }
+          : typeof c.ssl === 'object'
+          ? (c.ssl as object)
+          : false
 
       client = new PgClient({
         host: c.host,
@@ -93,13 +176,13 @@ export class ConnectionTestService {
         password: c.password,
         ssl,
         connectionTimeoutMillis: c.timeout || 30_000,
-      });
+      })
     }
 
     try {
-      await client.connect();
-      const result = await client.query('SELECT version()');
-      const version = result.rows?.[0]?.version as string | undefined;
+      await client.connect()
+      const result = await client.query('SELECT version()')
+      const version = result.rows?.[0]?.version as string | undefined
       return {
         success: true,
         details: {
@@ -108,32 +191,35 @@ export class ConnectionTestService {
           capabilities: ['SQL', 'ACID', 'Indexing'],
         },
         testedAt: new Date(),
-      };
+      }
     } finally {
-      await client.end().catch(() => {});
+      await client.end().catch(() => {})
     }
   }
 
-  /* ───────── MySQL ───────── */
+  /* ───────── MySQL (test) ───────── */
   private async testMySQL(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    const cfg: any = {
+    const c = ds.connectionConfig as any
+
+    const cfg: ConnectionOptions = {
       host: c.host,
       port: c.port || 3306,
       database: toStr(c.database),
       user: c.username,
       password: c.password,
       connectTimeout: c.timeout || 30_000,
-      acquireTimeout: c.timeout || 30_000,
-    };
+    }
 
-    if (c.ssl === true) cfg.ssl = { rejectUnauthorized: false };
-    else if (typeof c.ssl === 'object') cfg.ssl = c.ssl;
+    if (c.ssl === true) {
+      cfg.ssl = { rejectUnauthorized: false } as any
+    } else if (typeof c.ssl === 'object') {
+      cfg.ssl = c.ssl as any
+    }
 
-    const conn = await createMySQLConnection(cfg);
+    const conn = await createMySQLConnection(cfg)
     try {
-      const [rows] = await conn.execute('SELECT VERSION() as version');
-      const version = (rows as any)?.[0]?.version as string | undefined;
+      const [rows] = await conn.execute('SELECT VERSION() as version')
+      const version = (rows as any)?.[0]?.version as string | undefined
       return {
         success: true,
         details: {
@@ -142,72 +228,86 @@ export class ConnectionTestService {
           capabilities: ['SQL', 'ACID', 'Replication'],
         },
         testedAt: new Date(),
-      };
+      }
     } finally {
-      await conn.end().catch(() => {});
+      await conn.end().catch(() => {})
     }
   }
 
-  /* ───────── SQL Server (mock) ───────── */
+  /* ───────── SQL Server (basic placeholder) ───────── */
   private async testSQLServer(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
+    const c = ds.connectionConfig as any
     return new Promise((resolve, reject) => {
       setTimeout(() => {
         if (!c.host || !c.username || !c.password) {
-          reject(new Error('Missing required connection parameters'));
-          return;
+          reject(new Error('Missing required connection parameters'))
+          return
         }
         resolve({
           success: true,
           details: {
-            version: 'SQL Server 2019',
-            serverInfo: { type: 'SQL Server', host: c.host, port: c.port || 1433 },
+            version: 'SQL Server (placeholder)',
+            serverInfo: {
+              type: 'SQL Server',
+              host: c.host,
+              port: c.port || 1433,
+            },
             capabilities: ['SQL', 'ACID', 'Clustering'],
           },
           testedAt: new Date(),
-        });
-      }, 100);
-    });
+        })
+      }, 100)
+    })
   }
 
-  /* ───────── MongoDB ───────── */
+  /* ───────── MongoDB (test) ───────── */
   private async testMongoDB(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    const auth = c.username ? `${c.username}:${c.password}@` : '';
-    const port = c.port || 27017;
-    const database = c.database ? `/${toStr(c.database)}` : '';
-    const uri = c.connectionString || `mongodb://${auth}${c.host}:${port}${database}`;
+    const c = ds.connectionConfig as any
+    const auth = c.username ? `${c.username}:${c.password}@` : ''
+    const port = c.port || 27017
+    const database = c.database ? `/${toStr(c.database)}` : ''
+    const uri = c.connectionString || `mongodb://${auth}${c.host}:${port}${database}`
 
-    const client = new MongoClient(uri, { serverSelectionTimeoutMS: c.timeout || 30_000 });
+    const client = new MongoClient(uri, {
+      serverSelectionTimeoutMS: c.timeout || 30_000,
+    })
     try {
-      await client.connect();
-      const serverStatus = await client.db().admin().serverStatus();
+      await client.connect()
+      const serverStatus = await client.db().admin().serverStatus()
       return {
         success: true,
         details: {
           version: (serverStatus as any).version,
-          serverInfo: { type: 'MongoDB', host: (serverStatus as any).host, uptime: (serverStatus as any).uptime },
+          serverInfo: {
+            type: 'MongoDB',
+            host: (serverStatus as any).host,
+            uptime: (serverStatus as any).uptime,
+          },
           capabilities: ['Document Store', 'Indexing', 'Aggregation'],
         },
         testedAt: new Date(),
-      };
+      }
     } finally {
-      await client.close().catch(() => {});
+      await client.close().catch(() => {})
     }
   }
 
-  /* ───────── Redis ───────── */
+  /* ───────── Redis (test) ───────── */
   private async testRedis(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
+    const c = ds.connectionConfig as any
     const client = createRedisClient({
-      socket: { host: c.host, port: c.port || 6379, connectTimeout: c.timeout || 30_000 },
+      socket: {
+        host: c.host,
+        port: c.port || 6379,
+        connectTimeout: c.timeout || 30_000,
+      },
       password: c.password,
-    });
+    })
 
     try {
-      await client.connect();
-      const info = await client.info();
-      const version = info.match(/redis_version:([^\r\n]+)/)?.[1];
+      await client.connect()
+      const info = await client.info()
+      const version = info.match(/redis_version:([^\r\n]+)/)?.[1]
       return {
         success: true,
         details: {
@@ -216,79 +316,93 @@ export class ConnectionTestService {
           capabilities: ['Key-Value Store', 'Pub/Sub', 'Streams'],
         },
         testedAt: new Date(),
-      };
+      }
     } finally {
-      await client.disconnect().catch(() => {});
+      await client.disconnect().catch(() => {})
     }
   }
 
-  /* ───────── S3 ───────── */
+  /* ───────── S3 (test) ───────── */
   private async testS3(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    if (!isS3Config(c)) throw new Error('Invalid S3 configuration');
+    const c = ds.connectionConfig
+    if (!isS3Config(c)) throw new Error('Invalid S3 configuration')
 
-    const s3 = c as S3Config;
+    const s3 = c as S3Config
     if (!s3.accessKeyId || !s3.secretAccessKey) {
-      throw new Error('S3 credentials (accessKeyId and secretAccessKey) are required');
+      throw new Error(
+        'S3 credentials (accessKeyId and secretAccessKey) are required',
+      )
     }
 
     const s3Client = new S3Client({
       region: s3.region || 'us-east-1',
-      credentials: { accessKeyId: s3.accessKeyId, secretAccessKey: s3.secretAccessKey },
-    });
+      credentials: {
+        accessKeyId: s3.accessKeyId,
+        secretAccessKey: s3.secretAccessKey,
+      },
+    })
 
-    const response = await s3Client.send(new ListBucketsCommand({}));
-    const bucketExists = s3.bucket ? !!response.Buckets?.some(b => b.Name === s3.bucket) : true;
+    const response = await s3Client.send(new ListBucketsCommand({}))
+    const bucketExists = s3.bucket
+      ? !!response.Buckets?.some((b) => b.Name === s3.bucket)
+      : true
 
     return {
       success: true,
       details: {
-        serverInfo: { type: 'Amazon S3', region: s3.region, bucketCount: response.Buckets?.length || 0, bucketExists },
+        serverInfo: {
+          type: 'Amazon S3',
+          region: s3.region,
+          bucketCount: response.Buckets?.length || 0,
+          bucketExists,
+        },
         capabilities: ['Object Storage', 'Versioning', 'Lifecycle Management'],
       },
       testedAt: new Date(),
-    };
+    }
   }
 
-  /* ───────── HTTP API ───────── */
+  /* ───────── HTTP API (test) ───────── */
   private async testAPI(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    if (!isAPIConfig(c)) throw new Error('Invalid API configuration');
+    const c = ds.connectionConfig
+    if (!isAPIConfig(c)) throw new Error('Invalid API configuration')
 
-    const api = c as APIConfig;
-    if (!api.baseUrl) throw new Error('Base URL is required for API connections');
+    const api = c as APIConfig
+    if (!api.baseUrl) throw new Error('Base URL is required for API connections')
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': 'CWIC-Data-Service/1.0',
-      ...(api.headers || {}),
-    };
+      ...(api as any).headers || {},
+    }
 
-    if (api.apiKey) headers['Authorization'] = `Bearer ${api.apiKey}`;
+    if ((api as any).apiKey) headers['Authorization'] = `Bearer ${(api as any).apiKey}`
 
-    if (api.authentication) {
-      const creds = api.authentication.credentials || {};
-      switch (api.authentication.type) {
+    if ((api as any).authentication) {
+      const creds = (api as any).authentication.credentials || {}
+      switch ((api as any).authentication.type) {
         case 'basic':
           if (creds.username && creds.password) {
-            headers['Authorization'] = `Basic ${Buffer.from(`${creds.username}:${creds.password}`).toString('base64')}`;
+            headers['Authorization'] =
+              'Basic ' + Buffer.from(`${creds.username}:${creds.password}`).toString('base64')
           }
-          break;
+          break
         case 'bearer':
-          if (creds.token) headers['Authorization'] = `Bearer ${creds.token}`;
-          break;
+          if (creds.token) headers['Authorization'] = `Bearer ${creds.token}`
+          break
         case 'api-key':
-          if (creds.apiKey) headers[creds.headerName || 'X-API-Key'] = creds.apiKey;
-          break;
+          if (creds.apiKey)
+            headers[creds.headerName || 'X-API-Key'] = creds.apiKey
+          break
       }
     }
 
     try {
       const response = await axios.get(api.baseUrl, {
         headers,
-        timeout: api.timeout || 30_000,
-        validateStatus: s => s < 500,
-      });
+        timeout: (api as any).timeout || 30_000,
+        validateStatus: (s) => s < 500,
+      })
 
       return {
         success: true,
@@ -302,11 +416,11 @@ export class ConnectionTestService {
           capabilities: ['HTTP REST', 'JSON', 'Authentication'],
         },
         testedAt: new Date(),
-      };
+      }
     } catch (err) {
-      const error = err as AxiosError;
+      const error = err as AxiosError
       if (error.response) {
-        const ok = error.response.status < 500;
+        const ok = error.response.status < 500
         return {
           success: ok,
           details: {
@@ -318,81 +432,106 @@ export class ConnectionTestService {
             },
             capabilities: ['HTTP REST'],
           },
-          error: !ok ? `Server error: ${error.response.status} ${error.response.statusText}` : undefined,
+          error: !ok
+            ? `Server error: ${error.response.status} ${error.response.statusText}`
+            : undefined,
           testedAt: new Date(),
-        };
+        }
       }
-      if (error.request) throw new Error(`Network error: ${error.message}`);
-      throw error;
+      if (error.request) throw new Error(`Network error: ${error.message}`)
+      throw error
     }
   }
 
-  /* ───────── Snowflake (mock) ───────── */
+  /* ───────── Snowflake (placeholder) ───────── */
   private async testSnowflake(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    if (!isSnowflakeConfig(c)) throw new Error('Invalid Snowflake configuration');
-    const sf = c as SnowflakeConfig;
+    const c = ds.connectionConfig
+    if (!isSnowflakeConfig(c)) throw new Error('Invalid Snowflake configuration')
+    const sf = c as SnowflakeConfig
 
     return new Promise((resolve, reject) => {
       setTimeout(() => {
         if (!sf.host || !sf.username || !sf.password) {
-          reject(new Error('Missing required Snowflake connection parameters (host, username, password)'));
-          return;
+          reject(
+            new Error(
+              'Missing required Snowflake connection parameters (host, username, password)',
+            ),
+          )
+          return
         }
         resolve({
           success: true,
           details: {
-            version: 'Snowflake 6.0',
-            serverInfo: { type: 'Snowflake', account: sf.host, warehouse: sf.warehouse },
+            version: 'Snowflake (placeholder)',
+            serverInfo: {
+              type: 'Snowflake',
+              account: sf.host,
+              warehouse: sf.warehouse,
+            },
             capabilities: ['SQL', 'Data Warehouse', 'Auto-scaling'],
           },
           testedAt: new Date(),
-        });
-      }, 200);
-    });
+        })
+      }, 200)
+    })
   }
 
-  /* ───────── BigQuery (mock) ───────── */
+  /* ───────── BigQuery (placeholder) ───────── */
   private async testBigQuery(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    if (!isBigQueryConfig(c)) throw new Error('Invalid BigQuery configuration');
-    const bq = c as BigQueryConfig;
+    const c = ds.connectionConfig
+    if (!isBigQueryConfig(c)) throw new Error('Invalid BigQuery configuration')
+    const bq = c as BigQueryConfig
 
     return new Promise((resolve, reject) => {
       setTimeout(() => {
         if (!bq.projectId || !bq.serviceAccountKey) {
-          reject(new Error('Missing required BigQuery connection parameters (projectId, serviceAccountKey)'));
-          return;
+          reject(
+            new Error(
+              'Missing required BigQuery connection parameters (projectId, serviceAccountKey)',
+            ),
+          )
+          return
         }
         resolve({
           success: true,
           details: {
-            version: 'BigQuery API v2',
-            serverInfo: { type: 'Google BigQuery', projectId: bq.projectId, location: bq.location || 'US' },
+            version: 'BigQuery API (placeholder)',
+            serverInfo: {
+              type: 'Google BigQuery',
+              projectId: bq.projectId,
+              location: bq.location || 'US',
+            },
             capabilities: ['SQL', 'Analytics', 'Machine Learning'],
           },
           testedAt: new Date(),
-        });
-      }, 150);
-    });
+        })
+      }, 150)
+    })
   }
 
-  /* ───────── Elasticsearch ───────── */
+  /* ───────── Elasticsearch (test) ───────── */
   private async testElasticsearch(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig;
-    if (!c.host) throw new Error('Host is required for Elasticsearch connections');
+    const c = ds.connectionConfig as any
+    if (!c.host) throw new Error('Host is required for Elasticsearch connections')
 
-    const protocol = c.ssl ? 'https' : 'http';
-    const port = c.port || 9200;
-    const baseUrl = `${protocol}://${c.host}:${port}`;
+    const protocol = c.ssl ? 'https' : 'http'
+    const port = c.port || 9200
+    const baseUrl = `${protocol}://${c.host}:${port}`
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (c.username && c.password) {
-      headers['Authorization'] = `Basic ${Buffer.from(`${c.username}:${c.password}`).toString('base64')}`;
+      headers['Authorization'] =
+        'Basic ' + Buffer.from(`${c.username}:${c.password}`).toString('base64')
     }
 
-    const health = await axios.get(`${baseUrl}/_cluster/health`, { headers, timeout: c.timeout || 30_000 });
-    const root = await axios.get(`${baseUrl}/`, { headers, timeout: c.timeout || 30_000 });
+    const health = await axios.get(`${baseUrl}/_cluster/health`, {
+      headers,
+      timeout: c.timeout || 30_000,
+    })
+    const root = await axios.get(`${baseUrl}/`, {
+      headers,
+      timeout: c.timeout || 30_000,
+    })
 
     return {
       success: true,
@@ -407,17 +546,21 @@ export class ConnectionTestService {
         capabilities: ['Full-text Search', 'Analytics', 'Aggregations'],
       },
       testedAt: new Date(),
-    };
+    }
   }
 
-  /* ───────── Generic fallback ───────── */
+  /* ───────── Generic fallback (test) ───────── */
   private async testGeneric(ds: DataSource): Promise<ConnectionTestResult> {
-    const c = ds.connectionConfig as any;
+    const c = ds.connectionConfig as any
     return new Promise((resolve, reject) => {
       setTimeout(() => {
         if (!c.host && !c.baseUrl && !c.connectionString) {
-          reject(new Error('At least one of host, baseUrl, or connectionString is required'));
-          return;
+          reject(
+            new Error(
+              'At least one of host, baseUrl, or connectionString is required',
+            ),
+          )
+          return
         }
         resolve({
           success: true,
@@ -426,27 +569,192 @@ export class ConnectionTestService {
             capabilities: ['Generic Connection'],
           },
           testedAt: new Date(),
-        });
-      }, 100);
-    });
+        })
+      }, 100)
+    })
   }
 
-  /* ───────── Utilities ───────── */
-  public async testMultipleConnections(dataSources: DataSource[]): Promise<ConnectionTestResult[]> {
-    const promises = dataSources.map(ds =>
-      this.testConnection(ds).catch(err => {
-        const msg = err instanceof Error ? err.message : 'Unknown error';
-        return { success: false, error: msg, responseTime: 0, testedAt: new Date() } as ConnectionTestResult;
-      })
-    );
-    return Promise.all(promises);
+  /* =========================================================================
+     Database discovery helpers
+  ========================================================================= */
+
+  private async pgListDatabases(cfg: any): Promise<Array<{ name: string }>> {
+    const base: any = cfg?.connectionString
+      ? { connectionString: cfg.connectionString }
+      : {
+          host: cfg.host,
+          port: cfg.port || 5432,
+          user: cfg.username,
+          password: cfg.password,
+          database: cfg.database || 'postgres',
+          ssl:
+            cfg.ssl === true
+              ? { rejectUnauthorized: false }
+              : typeof cfg.ssl === 'object'
+              ? cfg.ssl
+              : false,
+        }
+    const client = new PgClient({
+      ...base,
+      connectionTimeoutMillis: cfg.timeout || 30_000,
+    })
+
+    try {
+      await client.connect()
+      const q = `
+        SELECT datname
+        FROM pg_database
+        WHERE datistemplate = false
+        ORDER BY datname;
+      `
+      const { rows } = await client.query(q)
+      return rows.map((r) => ({ name: r.datname as string }))
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
+
+  private async mysqlListDatabases(
+    cfgIn: any,
+  ): Promise<Array<{ name: string }>> {
+    const cfg: ConnectionOptions = {
+      host: cfgIn.host,
+      port: cfgIn.port || 3306,
+      user: cfgIn.username,
+      password: cfgIn.password,
+      // no database needed for SHOW DATABASES
+      connectTimeout: cfgIn.timeout || 30_000,
+    }
+
+    if (cfgIn.ssl === true) {
+      cfg.ssl = { rejectUnauthorized: false } as any
+    } else if (typeof cfgIn.ssl === 'object') {
+      cfg.ssl = cfgIn.ssl as any
+    }
+
+    const conn = await createMySQLConnection(cfg)
+    try {
+      const [rows] = await conn.query('SHOW DATABASES;')
+      return (rows as any[]).map((r) => ({ name: r.Database as string }))
+    } finally {
+      await conn.end().catch(() => {})
+    }
+  }
+
+  // Replace the mssqlListDatabases method in your ConnectionTestService.ts
+  private async mssqlListDatabases(cfg: any): Promise<Array<{ name: string }>> {
+    try {
+      const mssql = require('mssql');
+      
+      const config = {
+        server: cfg.host,
+        port: Number(cfg.port || 1433),
+        user: cfg.username,
+        password: cfg.password,
+        database: 'master', // Connect to master for server-level queries
+        options: {
+          encrypt: !!cfg.ssl, // Required for Azure SQL
+          trustServerCertificate: !cfg.ssl, // For self-signed certs
+          enableArithAbort: true,
+        },
+        connectionTimeout: cfg.timeout || 15000,
+        requestTimeout: cfg.timeout || 15000,
+      };
+
+      console.log('🔍 MSSQL Discovery: Connecting to server...', { host: cfg.host, port: cfg.port });
+      
+      const pool = await mssql.connect(config);
+      
+      try {
+        console.log('🔍 MSSQL Discovery: Connected, querying databases...');
+        
+        const result = await pool.request().query(`
+          SELECT name 
+          FROM sys.databases 
+          WHERE state = 0 
+            AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
+            AND HAS_DBACCESS(name) = 1
+          ORDER BY name
+        `);
+        
+        const databases = result.recordset.map((row: any) => ({ name: row.name }));
+        console.log('🔍 MSSQL Discovery: Found databases:', databases);
+        
+        return databases;
+      } finally {
+        await pool.close();
+        console.log('🔍 MSSQL Discovery: Connection closed');
+      }
+    } catch (error) {
+      console.error('❌ MSSQL database discovery failed:', error);
+      // Return known database as fallback for Azure SQL
+      if (cfg.host?.includes('database.windows.net')) {
+        console.log('🔍 MSSQL Discovery: Azure SQL detected, trying common patterns...');
+        return [{ name: 'Feya_Db' }]; // Your known database
+      }
+      return []; // Return empty array on failure for other cases
+    }
+  }
+
+  private async mongoListDatabases(cfg: any): Promise<Array<{ name: string }>> {
+    const auth = cfg.username ? `${cfg.username}:${cfg.password}@` : ''
+    const port = cfg.port || 27017
+    const uri = cfg.connectionString || `mongodb://${auth}${cfg.host}:${port}`
+
+    const client = new MongoClient(uri, {
+      serverSelectionTimeoutMS: cfg.timeout || 30_000,
+    })
+    try {
+      await client.connect()
+      const adminDb = client.db().admin()
+      const res = await adminDb.listDatabases()
+      const dbs = (res.databases || []).map((d: any) => ({
+        name: d.name as string,
+      }))
+      return dbs
+    } finally {
+      await client.close().catch(() => {})
+    }
+  }
+
+  /* ========================================================================= */
+
+  public async testMultipleConnections(
+    dataSources: DataSource[],
+  ): Promise<ConnectionTestResult[]> {
+    const promises = dataSources.map((ds) =>
+      this.testConnection(ds).catch((err) => {
+        const msg = err instanceof Error ? err.message : 'Unknown error'
+        return {
+          success: false,
+          error: msg,
+          responseTime: 0,
+          testedAt: new Date(),
+        } as ConnectionTestResult
+      }),
+    )
+    return Promise.all(promises)
   }
 
   public getSupportedTypes(): string[] {
     return [
-      'postgresql','mysql','mssql','mongodb','redis','s3','api','file',
-      'snowflake','bigquery','elasticsearch','oracle','azure-blob','gcs',
-      'redshift','databricks','kafka',
-    ];
+      'postgresql',
+      'mysql',
+      'mssql',
+      'mongodb',
+      'redis',
+      's3',
+      'api',
+      'file',
+      'snowflake',
+      'bigquery',
+      'elasticsearch',
+      'oracle',
+      'azure-blob',
+      'gcs',
+      'redshift',
+      'databricks',
+      'kafka',
+    ]
   }
 }

@@ -1,0 +1,20 @@
+{
+  "recommendations": [
+    "ms-vscode.vscode-typescript-next",
+    "bradlc.vscode-tailwindcss",
+    "esbenp.prettier-vscode",
+    "dbaeumer.vscode-eslint",
+    "ms-vscode.vscode-json",
+    "redhat.vscode-yaml",
+    "ms-python.python",
+    "ms-vscode.docker",
+    "hashicorp.terraform",
+    "ms-kubernetes-tools.vscode-kubernetes-tools",
+    "GitHubCopilot.github-copilot",
+    "ms-vscode.vscode-thunder-client",
+    "humao.rest-client",
+    "formulahendry.auto-rename-tag",
+    "christian-kohler.path-intellisense",
+    "ms-vscode.vscode-todo-highlight"
+  ]
+}

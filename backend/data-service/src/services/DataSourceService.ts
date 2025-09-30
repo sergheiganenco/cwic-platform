@@ -1,4 +1,3 @@
-// backend/data-service/src/services/DataSourceService.ts
 import { randomUUID } from 'node:crypto';
 import {
   ConnectionConfig,
@@ -8,6 +7,7 @@ import {
   DataSourceType,
 } from '../models/DataSource';
 import { logger } from '../utils/logger';
+import { ConnectionTestService } from './ConnectionTestService';
 import { DatabaseService } from './DatabaseService';
 
 export interface PaginatedDataSources {
@@ -90,8 +90,17 @@ const SORT_MAP: Record<NonNullable<DataSourceListOptions['sortBy']>, string> = {
   type: 'type',
 };
 
+const normalizeType = (t?: string): DataSourceType | undefined => {
+  if (!t) return undefined;
+  const x = String(t).toLowerCase();
+  if (x === 'postgres') return 'postgresql';
+  if (['azure_sql', 'azure-sql', 'sqlserver', 'sql-server'].includes(x)) return 'mssql' as DataSourceType;
+  return x as DataSourceType;
+};
+
 export class DataSourceService {
   private db = new DatabaseService();
+  private tester = new ConnectionTestService();
 
   private makePublicId(): string {
     return `ds_${Date.now()}_${randomUUID().slice(0, 8)}`;
@@ -127,7 +136,7 @@ export class DataSourceService {
   private toConnectionConfig(raw: any, fallbackType?: DataSourceType): ConnectionConfig {
     try {
       const obj = raw == null ? {} : (typeof raw === 'string' ? JSON.parse(raw) : raw);
-      if (obj && typeof obj === 'object' && typeof obj.type === 'string') {
+      if (obj && typeof obj === 'object') {
         return obj as ConnectionConfig;
       }
     } catch { /* ignore */ }
@@ -154,6 +163,8 @@ export class DataSourceService {
       publicId: row.public_id ?? null,
     } as DataSource;
   }
+
+  /* ============================== CRUD + List ============================== */
 
   async getAllDataSources(options: DataSourceListOptions): Promise<PaginatedDataSources> {
     try {
@@ -228,7 +239,7 @@ export class DataSourceService {
       const publicId = this.makePublicId();
 
       const connectionCfg: ConnectionConfig =
-        data.connectionConfig && typeof (data.connectionConfig as any).type === 'string'
+        data.connectionConfig && typeof (data.connectionConfig as any) === 'object'
           ? (data.connectionConfig as ConnectionConfig)
           : this.toConnectionConfig(null, data.type as DataSourceType);
 
@@ -256,7 +267,7 @@ export class DataSourceService {
       const params: any[] = [
         data.name!,
         data.description ?? null,
-        data.type!,
+        normalizeType(data.type) ?? data.type!,
         data.status ?? ('pending' as DataSourceStatus),
         JSON.stringify(connectionCfg),
         Array.isArray(data.tags) ? data.tags : [],
@@ -290,7 +301,7 @@ export class DataSourceService {
 
       if (patch.name !== undefined)        push(`name = $${i++}`, patch.name);
       if (patch.description !== undefined) push(`description = $${i++}`, patch.description);
-      if (patch.type !== undefined)        push(`type = $${i++}`, patch.type);
+      if (patch.type !== undefined)        push(`type = $${i++}`, normalizeType(patch.type) ?? patch.type);
       if (patch.status !== undefined)      push(`status = $${i++}`, patch.status);
       if (patch.connectionConfig !== undefined) {
         const cfg = this.toConnectionConfig(patch.connectionConfig, (patch.type as any) ?? existing.type);
@@ -301,7 +312,7 @@ export class DataSourceService {
       if (patch.lastTestAt !== undefined)  push(`last_test_at = $${i++}`, patch.lastTestAt);
       if (patch.lastSyncAt !== undefined)  push(`last_sync_at = $${i++}`, patch.lastSyncAt);
       if (patch.lastError !== undefined)   push(`last_error = $${i++}`, patch.lastError);
-      if (patch.updatedBy !== undefined)   push(`updated_by = $${i++}`, patch.updatedBy ?? null);
+      if ((patch as any).updatedBy !== undefined)   push(`updated_by = $${i++}`, (patch as any).updatedBy ?? null);
 
       push(`updated_at = $${i++}`, new Date());
       params.push(id);
@@ -337,6 +348,8 @@ export class DataSourceService {
     }
   }
 
+  /* ============================== Health & Schema ============================== */
+
   async getHealthSummary(): Promise<HealthSummary> {
     try {
       const sql = `
@@ -358,6 +371,7 @@ export class DataSourceService {
   }
 
   async getDataSourceSchema(_id: string): Promise<SchemaInfo> {
+    // Keep your sample; wire to connector-specific logic later
     return {
       tables: [{
         name: 'users',
@@ -379,8 +393,9 @@ export class DataSourceService {
       totalColumns: 3,
       estimatedSize: '125MB',
     };
-    // Replace with real connector inspection per type/id.
   }
+
+  /* ============================== Sync & Status ============================== */
 
   async syncDataSource(id: string, _options: { force?: boolean } = {}): Promise<SyncResult> {
     const syncId = `sync_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -395,5 +410,37 @@ export class DataSourceService {
       startedAt: new Date(),
       completedAt: new Date(),
     };
+  }
+
+  /**
+   * Optional status poller. If you later persist sync runs, fetch the actual
+   * row here. For now, return a simple completed status.
+   */
+  async getSyncStatus(_id: string): Promise<Partial<SyncResult>> {
+    return {
+      syncId: `sync_${Date.now()}`,
+      status: 'completed',
+      startedAt: new Date(),
+      completedAt: new Date(),
+    };
+  }
+
+  /* ============================== Databases listing ============================== */
+
+  /**
+   * List databases for an existing data source (server-level discovery).
+   * Uses the same discovery engine as the controller’s preview endpoint,
+   * but with the persisted config.
+   */
+  async listDatabases(id: string): Promise<Array<{ name: string }>> {
+    const ds = await this.getDataSourceById(id);
+    if (!ds) return [];
+    const type = normalizeType(ds.type) ?? ds.type;
+    try {
+      return await this.tester.discoverDatabasesFromConfig(type, ds.connectionConfig);
+    } catch (err) {
+      logger.warn(`listDatabases failed for ${id}: ${(err as Error)?.message}`);
+      return [];
+    }
   }
 }

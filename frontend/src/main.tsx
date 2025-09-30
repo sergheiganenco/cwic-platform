@@ -13,31 +13,33 @@ import { AuthProvider } from '@hooks/useAuth'
 import AppRouter from './routes/router'
 import { store } from './store/store'
 
+// ✅ existing global DB provider
+import { DbProvider } from '@/store/dbContext'
+// ✅ NEW: scope provider
+import { DbScopeProvider } from '@/store/dbScope'
+
+// styles …
+import '@/styles/ai-assistant.css'
+import '@/styles/components.css'
 import '@/styles/globals.css'
 import '@/styles/tailwind.css'
+import '@/styles/utilities.css'
 
-// ✅ DEV auth bootstrap: stash a token so Axios can send Authorization
+// dev auth bootstrap …
 if (import.meta.env.DEV) {
   const devJwt = import.meta.env.VITE_DEV_JWT as string | undefined
-  const hasToken =
-    !!localStorage.getItem('authToken') || !!sessionStorage.getItem('authToken')
+  const hasToken = !!localStorage.getItem('authToken') || !!sessionStorage.getItem('authToken')
   if (devJwt && !hasToken) {
     localStorage.setItem('authToken', devJwt)
     sessionStorage.setItem('authToken', devJwt)
   }
 }
 
-// Debug: confirm what baseURL the http client resolved to
 console.log('[HTTP] baseURL =', http.defaults.baseURL)
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: {
-      staleTime: 60 * 1000,
-      gcTime: 10 * 60 * 1000,
-      refetchOnWindowFocus: false,
-      retry: 2,
-    },
+    queries: { staleTime: 60_000, gcTime: 600_000, refetchOnWindowFocus: false, retry: 2 },
     mutations: { retry: 1 },
   },
 })
@@ -45,25 +47,30 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <Provider store={store}>
-      <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <Toaster />
-          <ErrorBoundary>
-            <React.Suspense
-              fallback={
-                <div className="min-h-screen flex items-center justify-center bg-gray-50">
-                  <LoadingSpinner label="Loading CWIC…" />
-                </div>
-              }
-            >
-              <AuthProvider>
-                <AppRouter />
-              </AuthProvider>
-            </React.Suspense>
-          </ErrorBoundary>
-          {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
-        </ToastProvider>
-      </QueryClientProvider>
+      <DbProvider>
+        {/* ⬇️ mount the scope provider so any page can call useDbScope() */}
+        <DbScopeProvider>
+          <QueryClientProvider client={queryClient}>
+            <ToastProvider>
+              <Toaster />
+              <ErrorBoundary>
+                <React.Suspense
+                  fallback={
+                    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+                      <LoadingSpinner label="Loading CWIC…" />
+                    </div>
+                  }
+                >
+                  <AuthProvider>
+                    <AppRouter />
+                  </AuthProvider>
+                </React.Suspense>
+              </ErrorBoundary>
+              {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
+            </ToastProvider>
+          </QueryClientProvider>
+        </DbScopeProvider>
+      </DbProvider>
     </Provider>
   </React.StrictMode>,
 )

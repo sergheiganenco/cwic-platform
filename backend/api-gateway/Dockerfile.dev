@@ -1,20 +1,25 @@
-﻿# Dev image for api-gateway
-FROM node:20-alpine
+﻿FROM node:20-alpine
 
 WORKDIR /app
-
 RUN apk add --no-cache curl
 
 COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+RUN if [ -s package-lock.json ] && grep -q '"lockfileVersion"' package-lock.json; then \
+    npm ci --no-audit --no-fund; \
+    else \
+    echo "No valid package-lock.json → using npm install"; \
+    npm install --no-audit --no-fund; \
+    fi
 
-COPY . .
+# Ensure tsx exists even if not hoisted into PATH
+RUN npm i -g tsx@4
 
-USER node
+COPY tsconfig.json ./tsconfig.json
+COPY src ./src
+
+ENV NODE_ENV=development
+ENV HOST=0.0.0.0
+ENV PORT=8000
 
 EXPOSE 8000
-
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
-
-CMD ["npm","run","dev"]
+CMD ["tsx", "--enable-source-maps", "src/server.ts"]
