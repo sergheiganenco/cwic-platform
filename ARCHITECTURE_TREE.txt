@@ -1,0 +1,840 @@
+﻿
+ARCHITECTURE TREE: C:\Users\sergh\cwic-platform
+Generated: 2025-10-02T10:12:24
+ExcludeDirs: node_modules, .git, dist, build, .next, coverage, .vscode, .idea, .turbo, logs, tmp, temp
+IncludeFiles: True  ShowSizes: False  MaxDepth: 0
+
+cwic-platform/
+|-- .github/
+|  |-- ISSUE_TEMPLATE/
+|  |  `-- .gitkeep
+|  |-- workflows/
+|  |  |-- .gitkeep
+|  |  |-- cd.yml
+|  |  |-- ci.yml
+|  |  |-- dependency-update.yml
+|  |  `-- security.yml
+|  |-- dependabot.yml
+|  `-- PULL_REQUEST_TEMPLATE.md
+|-- backend/
+|  |-- ai-service/
+|  |  |-- src/
+|  |  |  |-- config/
+|  |  |  |  |-- database.ts
+|  |  |  |  |-- openai.ts
+|  |  |  |  `-- redis.ts
+|  |  |  |-- controllers/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- AnalysisController.ts
+|  |  |  |  |-- DiscoveryController.ts
+|  |  |  |  `-- HealthController.ts
+|  |  |  |-- interfaces/
+|  |  |  |  |-- analysis.interface.ts
+|  |  |  |  |-- discovery.interface.ts
+|  |  |  |  `-- index.ts
+|  |  |  |-- jobs/
+|  |  |  |  |-- analysisJob.ts
+|  |  |  |  `-- discoveryJob.ts
+|  |  |  |-- middleware/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- auth.ts
+|  |  |  |  |-- errorHandler.ts
+|  |  |  |  |-- rateLimit.ts
+|  |  |  |  `-- validation.ts
+|  |  |  |-- models/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- Analysis.ts
+|  |  |  |  |-- DataField.ts
+|  |  |  |  `-- Discovery.ts
+|  |  |  |-- processors/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- DataProcessor.ts
+|  |  |  |  |-- FieldProcessor.ts
+|  |  |  |  `-- SchemaProcessor.ts
+|  |  |  |-- prompts/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- fieldDiscovery.ts
+|  |  |  |  |-- naturalLanguage.ts
+|  |  |  |  `-- qualityRules.ts
+|  |  |  |-- routes/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- analysis.ts
+|  |  |  |  |-- discovery.ts
+|  |  |  |  `-- index.ts
+|  |  |  |-- scripts/
+|  |  |  |  |-- cleanup.ts
+|  |  |  |  |-- migrate.ts
+|  |  |  |  `-- seed.ts
+|  |  |  |-- services/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- AIService.ts
+|  |  |  |  |-- AnalysisService.ts
+|  |  |  |  |-- CacheService.ts
+|  |  |  |  |-- DefaultDataProcessor.ts
+|  |  |  |  `-- DiscoveryService.ts
+|  |  |  |-- utils/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- errors.ts
+|  |  |  |  |-- gracefulShutdown.ts
+|  |  |  |  |-- logger.ts
+|  |  |  |  |-- responses.ts
+|  |  |  |  `-- validator.ts
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  `-- server.ts
+|  |  |-- tests/
+|  |  |  |-- analysis.test.ts
+|  |  |  |-- discovery.test.ts
+|  |  |  `-- health.test.ts
+|  |  |-- .dockerignore
+|  |  |-- .env
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- logs.6b77785a74c362881f6fb7e95a7530280abbf9ed-audit.json
+|  |  |-- logs.ca6dad43b7d35307d69543a741eb24d3ce997028-audit.json
+|  |  |-- package.json
+|  |  |-- package-lock.json
+|  |  `-- tsconfig.json
+|  |-- api-gateway/
+|  |  |-- src/
+|  |  |  |-- config/
+|  |  |  |  `-- upstreams.ts
+|  |  |  |-- controllers/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- middleware/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- cors.ts
+|  |  |  |  |-- healthCheck.ts
+|  |  |  |  `-- normalizeDataSourceBody.ts
+|  |  |  |-- models/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- proxy/
+|  |  |  |  |-- aiServiceProxy.ts
+|  |  |  |  |-- authServiceProxy.ts
+|  |  |  |  |-- dataServiceProxy.ts
+|  |  |  |  `-- shared.ts
+|  |  |  |-- routes/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- services/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- utils/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  `-- server.ts
+|  |  |-- tests/
+|  |  |-- .env
+|  |  |-- .env.docker
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- package.json
+|  |  `-- tsconfig.json
+|  |-- auth-service/
+|  |  |-- src/
+|  |  |  |-- config/
+|  |  |  |  `-- env.ts
+|  |  |  |-- controllers/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- middleware/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- error.ts
+|  |  |  |  `-- requireAuth.ts
+|  |  |  |-- models/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- routes/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  `-- auth.ts
+|  |  |  |-- services/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- utils/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- jwt.ts
+|  |  |  |  `-- password.ts
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  |-- db.ts
+|  |  |  |-- redis.ts
+|  |  |  `-- server.ts
+|  |  |-- tests/
+|  |  |-- .dockerignore
+|  |  |-- .env
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- package.json
+|  |  `-- tsconfig.json
+|  |-- data-service/
+|  |  |-- migrations/
+|  |  |  |-- 001_catalog_schema.sql
+|  |  |  |-- 001_init.sql
+|  |  |  |-- 006_widen_data_source_type_check.sql
+|  |  |  |-- 007_add_connection_config.sql
+|  |  |  |-- 008_add_audit_columns.sql
+|  |  |  |-- 009_add_last_test_at.sql
+|  |  |  |-- 010_align_data_sources.sql
+|  |  |  |-- 105_catalog_enhancements.sql
+|  |  |  `-- 105_catalog_perf.sql
+|  |  |-- openapi/
+|  |  |  `-- catalog.yml
+|  |  |-- src/
+|  |  |  |-- config/
+|  |  |  |  |-- database.ts
+|  |  |  |  `-- env.ts
+|  |  |  |-- controllers/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- AssetController.ts
+|  |  |  |  |-- DataSourceController.ts
+|  |  |  |  |-- GovernanceController.ts
+|  |  |  |  |-- LineageController.ts
+|  |  |  |  |-- QualityController.ts
+|  |  |  |  |-- RequestsController.ts
+|  |  |  |  `-- StatsController.ts
+|  |  |  |-- db/
+|  |  |  |  `-- pool.ts
+|  |  |  |-- middleware/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- audit.ts
+|  |  |  |  |-- auth.ts
+|  |  |  |  |-- error.ts
+|  |  |  |  |-- rateLimit.ts
+|  |  |  |  `-- validation.ts
+|  |  |  |-- models/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- Connection.ts
+|  |  |  |  |-- ConnectionRuntime.ts
+|  |  |  |  `-- DataSource.ts
+|  |  |  |-- queue/
+|  |  |  |  `-- index.ts
+|  |  |  |-- repositories/
+|  |  |  |  `-- dataSourcesRepo.ts
+|  |  |  |-- routes/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- assets.ts
+|  |  |  |  |-- catalog.ts
+|  |  |  |  |-- chat.ts
+|  |  |  |  |-- dataSources.routes.ts
+|  |  |  |  |-- dataSources.ts
+|  |  |  |  |-- governance.ts
+|  |  |  |  |-- index.ts
+|  |  |  |  |-- lineage.ts
+|  |  |  |  |-- quality.ts
+|  |  |  |  |-- requests.ts
+|  |  |  |  |-- sources.ts
+|  |  |  |  `-- stats.ts
+|  |  |  |-- services/
+|  |  |  |  |-- connectors/
+|  |  |  |  |  |-- azureSql.ts
+|  |  |  |  |  |-- base.ts
+|  |  |  |  |  `-- factory.ts
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- AssetService.ts
+|  |  |  |  |-- ConnectionTestService.ts
+|  |  |  |  |-- DatabaseService.migrations.additions.ts
+|  |  |  |  |-- DatabaseService.ts
+|  |  |  |  |-- DataSourceService.ts
+|  |  |  |  |-- GovernanceService.ts
+|  |  |  |  |-- LineageService.ts
+|  |  |  |  |-- QualityService.ts
+|  |  |  |  |-- RequestsService.ts
+|  |  |  |  `-- StatsService.ts
+|  |  |  |-- utils/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- logger.ts
+|  |  |  |  |-- normalizeType.ts
+|  |  |  |  `-- pagination.ts
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  |-- cron.ts
+|  |  |  |-- db.ts
+|  |  |  |-- server.ts
+|  |  |  `-- worker.ts
+|  |  |-- tests/
+|  |  |-- .dockerignore
+|  |  |-- .env
+|  |  |-- .env.docker
+|  |  |-- .npmrc
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- package.json
+|  |  |-- package-lock.json
+|  |  `-- tsconfig.json
+|  |-- integration-service/
+|  |  |-- src/
+|  |  |  |-- adapters/
+|  |  |  |  |-- azure-devops/
+|  |  |  |  |  `-- .gitkeep
+|  |  |  |  |-- git/
+|  |  |  |  |  `-- .gitkeep
+|  |  |  |  |-- jira/
+|  |  |  |  |  `-- .gitkeep
+|  |  |  |  `-- servicenow/
+|  |  |  |     `-- .gitkeep
+|  |  |  |-- config/
+|  |  |  |-- controllers/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- middleware/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- models/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- routes/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- services/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- utils/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  `-- server.ts
+|  |  |-- tests/
+|  |  |-- .env
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- package.json
+|  |  `-- tsconfig.json
+|  |-- notification-service/
+|  |  |-- src/
+|  |  |  |-- config/
+|  |  |  |-- controllers/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- middleware/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- models/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- routes/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- services/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- utils/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  `-- server.ts
+|  |  |-- tests/
+|  |  |-- .env
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- package.json
+|  |  `-- tsconfig.json
+|  |-- pipeline-service/
+|  |  |-- src/
+|  |  |  |-- config/
+|  |  |  |-- controllers/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- middleware/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- models/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- routes/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- services/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- utils/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- .gitkeep
+|  |  |  |-- app.ts
+|  |  |  `-- server.ts
+|  |  |-- tests/
+|  |  |-- .env
+|  |  |-- Dockerfile
+|  |  |-- Dockerfile.dev
+|  |  |-- package.json
+|  |  `-- tsconfig.json
+|  |-- shared/
+|  |  |-- config/
+|  |  |  `-- .gitkeep
+|  |  |-- constants/
+|  |  |  `-- .gitkeep
+|  |  |-- middleware/
+|  |  |  `-- .gitkeep
+|  |  |-- types/
+|  |  |  `-- .gitkeep
+|  |  |-- utils/
+|  |  |  `-- .gitkeep
+|  |  `-- index.ts
+|  |-- package.json
+|  `-- package-lock.json
+|-- database/
+|  |-- init/
+|  |  `-- 02-auth.sql
+|  |-- migrations/
+|  |  |-- .gitkeep
+|  |  |-- 001_initial_schema.sql
+|  |  |-- 002_add_data_sources.sql
+|  |  |-- 003_add_quality_rules.sql
+|  |  `-- 004_add_pipelines.sql
+|  |-- schemas/
+|  |  |-- .gitkeep
+|  |  |-- audit.sql
+|  |  |-- auth.sql
+|  |  |-- data_catalog.sql
+|  |  |-- pipelines.sql
+|  |  `-- quality.sql
+|  |-- scripts/
+|  |  |-- .gitkeep
+|  |  |-- backup.sh
+|  |  |-- create-multiple-databases.sh
+|  |  |-- health-check.sh
+|  |  |-- migrate.sh
+|  |  `-- restore.sh
+|  `-- seeds/
+|     |-- .gitkeep
+|     |-- data_sources.sql
+|     |-- pipelines.sql
+|     |-- quality_rules.sql
+|     `-- users.sql
+|-- docs/
+|  |-- api/
+|  |  |-- .gitkeep
+|  |  |-- ai-service.md
+|  |  |-- auth-service.md
+|  |  |-- data-service.md
+|  |  |-- openapi.yaml
+|  |  `-- pipeline-service.md
+|  |-- architecture/
+|  |  |-- .gitkeep
+|  |  |-- data-flow.md
+|  |  |-- deployment.md
+|  |  |-- scaling.md
+|  |  |-- security.md
+|  |  `-- system-overview.md
+|  |-- developer/
+|  |  |-- .gitkeep
+|  |  |-- coding-standards.md
+|  |  |-- contributing.md
+|  |  |-- deployment.md
+|  |  |-- setup.md
+|  |  `-- testing.md
+|  |-- user-guides/
+|  |  |-- .gitkeep
+|  |  |-- ai-assistant.md
+|  |  |-- data-catalog.md
+|  |  |-- getting-started.md
+|  |  |-- pipeline-management.md
+|  |  `-- quality-management.md
+|  `-- README.md
+|-- frontend/
+|  |-- public/
+|  |  |-- .gitkeep
+|  |  |-- favicon.ico
+|  |  |-- favicon.svg
+|  |  |-- index.html
+|  |  |-- logo192.png
+|  |  |-- logo512.png
+|  |  |-- manifest.json
+|  |  `-- vite.svg
+|  |-- src/
+|  |  |-- assets/
+|  |  |  |-- fonts/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- icons/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- images/
+|  |  |  |  `-- .gitkeep
+|  |  |  `-- react.svg
+|  |  |-- common/
+|  |  |  |-- ConfirmDialog.tsx
+|  |  |  |-- DataTable.tsx
+|  |  |  |-- ErrorBoundary.tsx
+|  |  |  |-- index.ts
+|  |  |  `-- LoadingSpinner.tsx
+|  |  |-- components/
+|  |  |  |-- common/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- ConfirmDialog.tsx
+|  |  |  |  |-- DataTable.tsx
+|  |  |  |  |-- ErrorBoundary.tsx
+|  |  |  |  |-- index.ts
+|  |  |  |  `-- LoadingSpinner.tsx
+|  |  |  |-- features/
+|  |  |  |  |-- ai-assistant/
+|  |  |  |  |  |-- .gitkeep
+|  |  |  |  |  |-- ActionButtons.tsx
+|  |  |  |  |  |-- ChatInterface.tsx
+|  |  |  |  |  |-- index.ts
+|  |  |  |  |  |-- MessageBubble.tsx
+|  |  |  |  |  `-- TypingIndicator.tsx
+|  |  |  |  |-- connections/
+|  |  |  |  |  |-- .gitkeep
+|  |  |  |  |  |-- ConnectionForm.tsx
+|  |  |  |  |  |-- ConnectionTest.tsx
+|  |  |  |  |  |-- DataSourceList.tsx
+|  |  |  |  |  |-- HealthMonitor.tsx
+|  |  |  |  |  `-- index.ts
+|  |  |  |  |-- dashboard/
+|  |  |  |  |  |-- .gitkeep
+|  |  |  |  |  |-- ActivityFeed.tsx
+|  |  |  |  |  |-- DashboardOverview.tsx
+|  |  |  |  |  |-- index.ts
+|  |  |  |  |  |-- KPICards.tsx
+|  |  |  |  |  `-- QuickActions.tsx
+|  |  |  |  |-- data-catalog/
+|  |  |  |  |  |-- .gitkeep
+|  |  |  |  |  |-- AssetAnalytics.tsx
+|  |  |  |  |  |-- AssetCard.tsx
+|  |  |  |  |  |-- AssetDetails.tsx
+|  |  |  |  |  |-- AssetGrid.tsx
+|  |  |  |  |  |-- BulkActionModal.tsx
+|  |  |  |  |  |-- CreateAssetModal.tsx
+|  |  |  |  |  |-- index.ts
+|  |  |  |  |  `-- SearchFilters.tsx
+|  |  |  |  |-- data-quality/
+|  |  |  |  |  |-- .gitkeep
+|  |  |  |  |  |-- index.ts
+|  |  |  |  |  |-- QualityOverview.tsx
+|  |  |  |  |  |-- QualityRules.tsx
+|  |  |  |  |  |-- QualityTrends.tsx
+|  |  |  |  |  `-- ViolationsList.tsx
+|  |  |  |  |-- data-sources/
+|  |  |  |  |  |-- AddConnectionWizard.tsx
+|  |  |  |  |  |-- connectors.ts
+|  |  |  |  |  |-- DatabasePicker.tsx
+|  |  |  |  |  `-- DataSourceCard.tsx
+|  |  |  |  |-- pipelines/
+|  |  |  |  |  |-- .gitkeep
+|  |  |  |  |  |-- DeploymentHistory.tsx
+|  |  |  |  |  |-- index.ts
+|  |  |  |  |  |-- PipelineCard.tsx
+|  |  |  |  |  |-- PipelineDetails.tsx
+|  |  |  |  |  `-- PipelineList.tsx
+|  |  |  |  `-- requests/
+|  |  |  |     |-- .gitkeep
+|  |  |  |     |-- ApprovalWorkflow.tsx
+|  |  |  |     |-- index.ts
+|  |  |  |     |-- RequestDetails.tsx
+|  |  |  |     |-- RequestForm.tsx
+|  |  |  |     `-- RequestList.tsx
+|  |  |  |-- layout/
+|  |  |  |  |-- overlays/
+|  |  |  |  |  |-- CommandPalette.tsx
+|  |  |  |  |  `-- QuickActions.tsx
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- Footer.tsx
+|  |  |  |  |-- Header.tsx
+|  |  |  |  |-- index.ts
+|  |  |  |  |-- Navigation.tsx
+|  |  |  |  |-- PageContainer.tsx
+|  |  |  |  |-- SectionCard.tsx
+|  |  |  |  |-- shell.tsx
+|  |  |  |  `-- Sidebar.tsx
+|  |  |  |-- system/
+|  |  |  `-- ui/
+|  |  |     |-- .gitkeep
+|  |  |     |-- Badge.tsx
+|  |  |     |-- Button.tsx
+|  |  |     |-- Card.tsx
+|  |  |     |-- ErrorBoundary.tsx
+|  |  |     |-- index.ts
+|  |  |     |-- Input.tsx
+|  |  |     |-- MetricsCard.tsx
+|  |  |     |-- Modal.tsx
+|  |  |     |-- Notification.tsx
+|  |  |     |-- Select.tsx
+|  |  |     `-- Skeleton.tsx
+|  |  |-- config/
+|  |  |  |-- .gitkeep
+|  |  |  |-- api.ts
+|  |  |  |-- auth.ts
+|  |  |  |-- database.ts
+|  |  |  |-- environment.ts
+|  |  |  `-- index.ts
+|  |  |-- hooks/
+|  |  |  |-- .gitkeep
+|  |  |  |-- index.ts
+|  |  |  |-- useAIChat.ts
+|  |  |  |-- useApi.ts
+|  |  |  |-- useAssetMetrics.ts
+|  |  |  |-- useAuth.ts
+|  |  |  |-- useBulkActions.ts
+|  |  |  |-- useDataAssets.ts
+|  |  |  |-- useDataSources.ts
+|  |  |  |-- useDebounce.ts
+|  |  |  |-- useKeyboardShortcuts.ts
+|  |  |  |-- useLocalStorage.ts
+|  |  |  |-- useNotifications.ts
+|  |  |  |-- usePermissions.ts
+|  |  |  |-- usePipelines.ts
+|  |  |  |-- useQualityIssues.ts
+|  |  |  |-- useQualityRules.ts
+|  |  |  |-- useQualitySummary.ts
+|  |  |  |-- useRequests.ts
+|  |  |  |-- useUrlSync.ts
+|  |  |  `-- useWebSocket.ts
+|  |  |-- layouts/
+|  |  |  `-- AppLayout.tsx
+|  |  |-- pages/
+|  |  |  |-- .gitkeep
+|  |  |  |-- AIAssistant.tsx
+|  |  |  |-- Connections.tsx
+|  |  |  |-- Dashboard.tsx
+|  |  |  |-- DataCatalog.tsx
+|  |  |  |-- DataLineage.tsx
+|  |  |  |-- DataQuality.tsx
+|  |  |  |-- DataSourceConfiguration.tsx
+|  |  |  |-- DataSources.tsx
+|  |  |  |-- Governance.tsx
+|  |  |  |-- index.ts
+|  |  |  |-- Monitoring.tsx
+|  |  |  |-- Pipelines.tsx
+|  |  |  |-- Requests.tsx
+|  |  |  `-- Settings.tsx
+|  |  |-- routes/
+|  |  |  `-- router.tsx
+|  |  |-- services/
+|  |  |  |-- api/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- aiAssistant.ts
+|  |  |  |  |-- auth.ts
+|  |  |  |  |-- client.ts
+|  |  |  |  |-- dataAssets.ts
+|  |  |  |  |-- dataSources.ts
+|  |  |  |  |-- index.ts
+|  |  |  |  |-- notifications.ts
+|  |  |  |  |-- pipelines.ts
+|  |  |  |  |-- qualityRules.ts
+|  |  |  |  |-- Requests.ts
+|  |  |  |  `-- token.ts
+|  |  |  |-- database/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- azureSql.ts
+|  |  |  |  |-- dataLake.ts
+|  |  |  |  |-- fabric.ts
+|  |  |  |  |-- index.ts
+|  |  |  |  `-- synapse.ts
+|  |  |  |-- integrations/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- azureDevOps.ts
+|  |  |  |  |-- git.ts
+|  |  |  |  |-- index.ts
+|  |  |  |  |-- jira.ts
+|  |  |  |  `-- serviceNow.ts
+|  |  |  |-- assets.ts
+|  |  |  |-- auth.ts
+|  |  |  |-- http.ts
+|  |  |  |-- httpError.ts
+|  |  |  |-- sources.ts
+|  |  |  `-- tokenManager.ts
+|  |  |-- store/
+|  |  |  |-- middleware/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- authMiddleware.ts
+|  |  |  |  |-- index.ts
+|  |  |  |  `-- loggingMiddleware.ts
+|  |  |  |-- slices/
+|  |  |  |  |-- .gitkeep
+|  |  |  |  |-- authSlice.ts
+|  |  |  |  |-- dataAssetsSlice.ts
+|  |  |  |  |-- dataSourcesSlice.ts
+|  |  |  |  |-- notificationsSlice.ts
+|  |  |  |  |-- pipelinesSlice.ts
+|  |  |  |  |-- qualitySlice.ts
+|  |  |  |  |-- requestsSlice.ts
+|  |  |  |  `-- uiSlice.ts
+|  |  |  |-- dbContext.tsx
+|  |  |  |-- dbScope.tsx
+|  |  |  |-- index.ts
+|  |  |  `-- store.ts
+|  |  |-- styles/
+|  |  |  |-- .gitkeep
+|  |  |  |-- ai-assistant.css
+|  |  |  |-- components.css
+|  |  |  |-- globals.css
+|  |  |  |-- tailwind.css
+|  |  |  `-- utilities.css
+|  |  |-- types/
+|  |  |  |-- .gitkeep
+|  |  |  |-- api.ts
+|  |  |  |-- asset.ts
+|  |  |  |-- auth.ts
+|  |  |  |-- bulkActions.ts
+|  |  |  |-- common.ts
+|  |  |  |-- dataAssets.ts
+|  |  |  |-- dataSources.ts
+|  |  |  |-- global.d.ts
+|  |  |  |-- index.ts
+|  |  |  |-- notifications.ts
+|  |  |  |-- pipelines.ts
+|  |  |  |-- qualityRules.ts
+|  |  |  |-- Requests.ts
+|  |  |  `-- source.ts
+|  |  |-- utils/
+|  |  |  |-- .gitkeep
+|  |  |  |-- apiUtils.ts
+|  |  |  |-- cn.ts
+|  |  |  |-- constants.ts
+|  |  |  |-- dateUtils.ts
+|  |  |  |-- filterHelpers.ts
+|  |  |  |-- formatters.ts
+|  |  |  |-- helpers.ts
+|  |  |  |-- index.ts
+|  |  |  |-- stringUtils.ts
+|  |  |  `-- validators.ts
+|  |  |-- App.css
+|  |  |-- App.tsx
+|  |  |-- env.d.ts
+|  |  |-- index.css
+|  |  |-- main.tsx
+|  |  `-- vite-env.d.ts
+|  |-- .env
+|  |-- .env.development
+|  |-- .env.example
+|  |-- .env.production
+|  |-- .gitignore
+|  |-- .prettierrc
+|  |-- Dockerfile
+|  |-- eslint.config.js
+|  |-- index.html
+|  |-- package.json
+|  |-- postcss.config.js
+|  |-- README.md
+|  |-- tailwind.config.cjs
+|  |-- tailwind.config.js
+|  |-- tsconfig.app.json
+|  |-- tsconfig.json
+|  |-- tsconfig.node.json
+|  `-- vite.config.ts
+|-- infrastructure/
+|  |-- docker-compose/
+|  |  |-- .gitkeep
+|  |  |-- docker-compose.dev.yml
+|  |  |-- docker-compose.override.yml
+|  |  |-- docker-compose.prod.yml
+|  |  `-- docker-compose.staging.yml
+|  |-- helm-charts/
+|  |  |-- cwic-platform/
+|  |  |  |-- templates/
+|  |  |  |  `-- .gitkeep
+|  |  |  |-- Chart.yaml
+|  |  |  `-- values.yaml
+|  |  `-- dependencies/
+|  |     `-- .gitkeep
+|  |-- kubernetes/
+|  |  |-- configmaps/
+|  |  |  `-- .gitkeep
+|  |  |-- deployments/
+|  |  |  `-- .gitkeep
+|  |  |-- ingress/
+|  |  |  `-- .gitkeep
+|  |  |-- monitoring/
+|  |  |  `-- .gitkeep
+|  |  |-- namespaces/
+|  |  |  `-- .gitkeep
+|  |  |-- secrets/
+|  |  |  `-- .gitkeep
+|  |  `-- services/
+|  |     `-- .gitkeep
+|  |-- nginx/
+|  |  `-- nginx.conf
+|  |-- scripts/
+|  |  |-- .gitkeep
+|  |  |-- backup.sh
+|  |  |-- cleanup.sh
+|  |  |-- deploy.sh
+|  |  `-- rollback.sh
+|  `-- terraform/
+|     |-- environments/
+|     |  |-- dev/
+|     |  |  `-- .gitkeep
+|     |  |-- production/
+|     |  |  `-- .gitkeep
+|     |  `-- staging/
+|     |     `-- .gitkeep
+|     |-- modules/
+|     |  |-- compute/
+|     |  |  `-- .gitkeep
+|     |  |-- database/
+|     |  |  `-- .gitkeep
+|     |  |-- monitoring/
+|     |  |  `-- .gitkeep
+|     |  |-- networking/
+|     |  |  `-- .gitkeep
+|     |  `-- storage/
+|     |     `-- .gitkeep
+|     |-- main.tf
+|     |-- outputs.tf
+|     |-- terraform.tfvars.example
+|     `-- variables.tf
+|-- scripts/
+|  |-- deployment/
+|  |  |-- .gitkeep
+|  |  |-- deploy-production.sh
+|  |  |-- deploy-staging.sh
+|  |  |-- health-check.sh
+|  |  `-- rollback.sh
+|  |-- development/
+|  |  |-- .gitkeep
+|  |  |-- build.sh
+|  |  |-- lint.sh
+|  |  |-- start-dev.sh
+|  |  `-- test.sh
+|  |-- maintenance/
+|  |  |-- .gitkeep
+|  |  |-- backup.sh
+|  |  |-- cleanup.sh
+|  |  |-- security-scan.sh
+|  |  `-- update-dependencies.sh
+|  |-- setup/
+|  |  |-- .gitkeep
+|  |  |-- configure-environment.sh
+|  |  |-- init-project.sh
+|  |  |-- install-dependencies.sh
+|  |  |-- materialize-structure.ps1
+|  |  `-- setup-database.sh
+|  |-- health-check.ps1
+|  |-- make-dev-token.cjs
+|  `-- smoke.ps1
+|-- tests/
+|  |-- e2e/
+|  |  |-- cypress/
+|  |  |  `-- .gitkeep
+|  |  `-- playwright/
+|  |     `-- .gitkeep
+|  |-- fixtures/
+|  |  |-- .gitkeep
+|  |  |-- data-sources.json
+|  |  |-- pipelines.json
+|  |  `-- users.json
+|  |-- integration/
+|  |  |-- api/
+|  |  |  `-- .gitkeep
+|  |  `-- database/
+|  |     `-- .gitkeep
+|  |-- performance/
+|  |  |-- load/
+|  |  |  `-- .gitkeep
+|  |  `-- stress/
+|  |     `-- .gitkeep
+|  `-- unit/
+|     |-- backend/
+|     |  `-- .gitkeep
+|     `-- frontend/
+|        `-- .gitkeep
+|-- .env
+|-- .env.example
+|-- .gitattributes
+|-- .gitignore
+|-- _merged.yml
+|-- ARCHITECTURE_TREE.txt
+|-- backend code.txt
+|-- CHANGELOG.md
+|-- CONTRIBUTING.md
+|-- cwic-app-code-only.txt
+|-- cwic-full-dev-bundle.txt
+|-- cwic-platform.code-workspace
+|-- db_patch.sql
+|-- docker-compose.override.yml
+|-- docker-compose.override.yml.bak
+|-- docker-compose.prod.yml
+|-- docker-compose.yml
+|-- ensure-structure.ps1
+|-- extract-app-code.ps1
+|-- extract-code.ps1
+|-- file-list.txt
+|-- files.txt
+|-- frontend-structure.txt
+|-- jwtgen.js
+|-- LICENSE
+|-- package.json
+|-- package-lock.json
+|-- README.md
+|-- structure.txt
+`-- tree.ps1
+Saved: .\ARCHITECTURE_TREE.txt

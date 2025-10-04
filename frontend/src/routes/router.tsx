@@ -45,6 +45,13 @@ function lazyPage(name: string) {
 // ---------- Pages ----------
 const Dashboard     = lazyPage('Dashboard');
 const Assistant     = lazyPage('AIAssistant');
+const Analytics     = lazyPage('Analytics');
+const Reports       = lazyPage('Reports');
+const FieldDiscovery = lazyPage('FieldDiscovery');
+const Classification = lazyPage('Classification');
+const Compliance    = lazyPage('Compliance');
+const AuditLogs     = lazyPage('Audit');
+const Integrations  = lazyPage('Integrations');
 const DataCatalog   = lazyPage('DataCatalog');
 const DataQuality   = lazyPage('DataQuality');
 const DataLineage   = lazyPage('DataLineage');
@@ -54,6 +61,7 @@ const DataSources   = lazyPage('DataSources');
 const Governance    = lazyPage('Governance');
 const Monitoring    = lazyPage('Monitoring');
 const Settings      = lazyPage('Settings');
+const Users         = lazyPage('Users');
 const NotFound      = lazyPage('NotFound');
 
 // ---------- Route error boundary ----------
@@ -114,18 +122,26 @@ const routes: RouteObject[] = [
     errorElement: <RouteErrorBoundary />,
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
-      { path: 'dashboard',      element: withSuspense(<Dashboard />) },
-      { path: 'assistant',      element: withSuspense(<Assistant />) },
-      { path: 'catalog',        element: withSuspense(<DataCatalog />) },
-      { path: 'quality',        element: withSuspense(<DataQuality />) },
-      { path: 'lineage',        element: withSuspense(<DataLineage />) },
-      { path: 'pipelines',      element: withSuspense(<CICDPipelines />) },
-      { path: 'requests',       element: withSuspense(<Requests />) },
-      { path: 'data-sources',   element: withSuspense(<DataSources />) }, // <— matches nav
-      { path: 'governance',     element: withSuspense(<Governance />) },
-      { path: 'monitoring',     element: withSuspense(<Monitoring />) },
-      { path: 'settings',       element: withSuspense(<Settings />) },
-      { path: '*',              element: withSuspense(<NotFound />) },
+      { path: 'dashboard',       element: withSuspense(<Dashboard />) },
+      { path: 'assistant',       element: withSuspense(<Assistant />) },
+      { path: 'analytics',       element: withSuspense(<Analytics />) },
+      { path: 'reports',         element: withSuspense(<Reports />) },
+      { path: 'catalog',         element: withSuspense(<DataCatalog />) },
+      { path: 'quality',         element: withSuspense(<DataQuality />) },
+      { path: 'lineage',         element: withSuspense(<DataLineage />) },
+      { path: 'field-discovery', element: withSuspense(<FieldDiscovery />) },
+      { path: 'classification',  element: withSuspense(<Classification />) },
+      { path: 'compliance',      element: withSuspense(<Compliance />) },
+      { path: 'audit',           element: withSuspense(<AuditLogs />) },
+      { path: 'integrations',    element: withSuspense(<Integrations />) },
+      { path: 'pipelines',       element: withSuspense(<CICDPipelines />) },
+      { path: 'requests',        element: withSuspense(<Requests />) },
+      { path: 'data-sources',    element: withSuspense(<DataSources />) },
+      { path: 'governance',      element: withSuspense(<Governance />) },
+      { path: 'monitoring',      element: withSuspense(<Monitoring />) },
+      { path: 'settings',        element: withSuspense(<Settings />) },
+      {path: 'users',            element: withSuspense(<Users />) },
+      { path: '*',               element: withSuspense(<NotFound />) },
     ],
   },
 ];

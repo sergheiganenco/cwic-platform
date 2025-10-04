@@ -8,6 +8,7 @@ import {
   listDataSources,
   syncDataSource,
   testDataSource,
+  updateDataSource,
 } from '@/services/api/dataSources'
 
 import type {
@@ -18,10 +19,12 @@ import type {
   DataSourceType,
   PaginatedDataSources,
   SyncResult,
+  UpdateDataSourcePayload,
 } from '@/types/dataSources'
 
 import { toUserMessage } from '@/services/httpError'
 import { useDbScope } from '@/store/dbScope'
+import { debounce } from '@/utils/performanceUtils'
 
 type SortKey = 'name' | 'type' | 'status' | 'createdAt' | 'updatedAt'
 
@@ -104,6 +107,9 @@ export function useDataSources() {
   const [lastSyncs, setLastSyncs] = useState<Map<string, SyncResult>>(new Map())
 
   const mountedRef = useRef(true)
+  const lastFetchTime = useRef(0)
+  const MIN_FETCH_INTERVAL = 5000 // Minimum 5 seconds between fetches
+
   useEffect(() => {
     mountedRef.current = true
     return () => { mountedRef.current = false }
@@ -138,9 +144,17 @@ export function useDataSources() {
     setItems(prev => prev.map(ds => (ds.id === id ? { ...ds, ...patch } : ds)))
   }, [])
 
-  const refresh = useCallback(async () => {
+  const refreshInternal = useCallback(async (force = false) => {
+    // Prevent too frequent refreshes unless forced
+    const now = Date.now()
+    if (!force && now - lastFetchTime.current < MIN_FETCH_INTERVAL) {
+      return
+    }
+
     setLoading(true)
     setError(null)
+    lastFetchTime.current = now
+
     try {
       const res: PaginatedDataSources = await listDataSources(listParams)
       if (!mountedRef.current) return
@@ -160,13 +174,54 @@ export function useDataSources() {
     }
   }, [listParams])
 
-  useEffect(() => { refresh() }, [refresh])
+  const refresh = useCallback(async () => {
+    return refreshInternal(true)
+  }, [refreshInternal])
+
+  // Create a debounced version for automatic refresh
+  const debouncedRefresh = useMemo(
+    () => debounce(() => refreshInternal(false), 500),
+    [refreshInternal]
+  )
+
+  // Initial fetch with delay to prevent simultaneous calls on page load
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      refreshInternal(false)
+    }, 100)
+    return () => clearTimeout(timer)
+  }, []) // Only run once on mount
+
+  // Refresh when filters change, but debounced
+  useEffect(() => {
+    if (lastFetchTime.current > 0) { // Skip if this is the initial mount
+      debouncedRefresh()
+    }
+  }, [listParams, debouncedRefresh])
 
   const create = useCallback(async (draft: CreateDataSourcePayload) => {
     const created = await createDataSource(draft)
     await refresh()
     return created
   }, [refresh])
+
+  const update = useCallback(
+    async (id: string, patch: UpdateDataSourcePayload | Partial<DataSource>) => {
+      // optimistic local merge for snappy UI
+      updateItem(id, patch as Partial<DataSource>)
+      try {
+        const updated = await updateDataSource(id, patch as UpdateDataSourcePayload)
+        if (updated && typeof updated === 'object') {
+          updateItem(id, normalizeFromServer(updated))
+        }
+        await refresh()
+      } catch (e: any) {
+        await refresh() // revert optimistic state by reloading
+        throw new Error(toUserMessage(e))
+      }
+    },
+    [refresh, updateItem],
+  )
 
   const remove = useCallback(async (id: string) => {
     setOp('deleting', id, true)
@@ -227,7 +282,7 @@ export function useDataSources() {
         updatedTables: 0,
         errors: [msg],
         startedAt: new Date().toISOString(),
-      }))
+      } as any))
       throw new Error(msg)
     } finally {
       setOp('syncing', id, false)
@@ -342,6 +397,7 @@ export function useDataSources() {
     refresh,
     create,
     remove,
+    update, // ← added
     test,
     sync,
 

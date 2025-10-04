@@ -28,13 +28,8 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import * as React from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { dataSourcesApi } from '@/services/api/dataSources'; // ⬅️ fallback to your real API
 import type {
