@@ -1,5 +1,6 @@
 // src/hooks/useRequests.ts
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { debounce } from '@/utils/performanceUtils'
 
 export type RequestStatus = 'pending' | 'in_progress' | 'completed' | 'rejected'
 export type RequestPriority = 'low' | 'medium' | 'high'
@@ -292,10 +293,29 @@ export function useRequests(initial: Partial<RequestFilters> = {}) {
     }
   }, [filters, useMocks, apiBase]) // ← 🛠️ NO requests.length here
 
+  // Debounce refresh to prevent multiple simultaneous calls
+  const debouncedRefresh = useMemo(
+    () => debounce(refresh, 300),
+    [refresh]
+  )
+
+  // Initial load with slight delay to prevent race conditions
   useEffect(() => {
-    refresh()
-    return () => abortRef.current?.abort()
-  }, [refresh])
+    const timer = setTimeout(() => {
+      refresh()
+    }, 150) // Small delay to allow other hooks to settle
+    return () => {
+      clearTimeout(timer)
+      abortRef.current?.abort()
+    }
+  }, []) // Only on mount
+
+  // Refresh when filters change, but debounced
+  useEffect(() => {
+    if (filters.page !== 1 || filters.status !== 'all') {
+      debouncedRefresh()
+    }
+  }, [filters, debouncedRefresh])
 
   const setPage = useCallback((page: number) => {
     setFilters((prev) => ({ ...prev, page: Math.max(1, page) }))

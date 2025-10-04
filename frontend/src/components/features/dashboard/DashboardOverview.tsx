@@ -12,6 +12,7 @@ export interface DashboardOverviewProps {
   onNewScan?: () => void
   onRefresh?: () => void
   onImport?: () => void
+  actionsBusy?: boolean
 }
 
 /** A layout helper that arranges KPI, actions, and activity into a single section */
@@ -23,11 +24,12 @@ export function DashboardOverview({
   onNewScan,
   onRefresh,
   onImport,
+  actionsBusy,
 }: DashboardOverviewProps) {
   return (
     <div className="space-y-6">
       <KPICards items={kpis} loading={loadingKpis} />
-      <QuickActions onNewScan={onNewScan} onRefresh={onRefresh} onImport={onImport} />
+      <QuickActions onNewScan={onNewScan} onRefresh={onRefresh} onImport={onImport} busy={actionsBusy} />
       <ActivityFeed items={activities} loading={loadingActivity} />
     </div>
   )

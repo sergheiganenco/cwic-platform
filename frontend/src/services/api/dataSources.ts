@@ -16,11 +16,8 @@ import type {
 
 /**
  * NOTE ON TYPES:
- * - Your '@/types/dataSources' doesn't export AssetFilters and likely has a wider DataSourceType
- *   and a stricter SyncStatus. To remain source-compatible across backends, this service:
- *     • uses a local AssetFiltersInput (narrowed when calling),
- *     • builds normalized results with `any` internally, then casts once on the boundary,
- *     • uses Partial<Record<...>> maps for display names/features (falls back cleanly).
+ * Your '@/types/dataSources' union is broad and some backends vary in shape.
+ * This service normalizes responses defensively and only casts at the boundary.
  */
 
 /* -------------------------------- Helpers -------------------------------- */
@@ -60,20 +57,27 @@ function normalizeTestResult(raw: any): ConnectionTestResult {
 
   const successFromStatus =
     typeof raw.status === 'string'
-      ? ['ok', 'success', 'connected'].includes(raw.status.toLowerCase())
+      ? ['ok', 'success', 'connected', 'passed'].includes(raw.status.toLowerCase())
       : undefined
   const successFromConn =
     typeof raw.connectionStatus === 'string'
       ? raw.connectionStatus.toLowerCase() === 'connected'
       : undefined
 
-  out.success = boolish(raw.success) ?? successFromConn ?? successFromStatus
-  out.message = raw.message || raw.detail || raw.error || raw.reason || undefined
+  out.success = boolish(raw.success) ?? successFromConn ?? successFromStatus ?? false
+  out.message =
+    raw.message ||
+    raw.detail ||
+    raw.error ||
+    raw.reason ||
+    (out.success ? 'Connection OK' : 'Connection test failed')
+
   out.testedAt =
     toIso(raw.testedAt) ??
     toIso(raw.timestamp) ??
     toIso(raw.checkedAt) ??
     new Date().toISOString()
+
   out.responseTimeMs =
     typeof raw.responseTimeMs === 'number'
       ? raw.responseTimeMs
@@ -81,7 +85,7 @@ function normalizeTestResult(raw: any): ConnectionTestResult {
       ? raw.latencyMs
       : undefined
 
-  // Keep server extras
+  // Keep server extras (connectionStatus, metadata, etc.)
   Object.assign(out, raw)
 
   return out as ConnectionTestResult
@@ -93,7 +97,7 @@ function normalizeSyncResult(raw: any, id: string): SyncResult {
 
   if (!raw || typeof raw !== 'object') {
     out.syncId = `local_${Date.now()}_${id}`
-    out.status = 'started' // internal value; cast later
+    out.status = 'started' // tolerant internal value; backend may use different literals
     out.startedAt = new Date().toISOString()
     out.errors = []
     out.message = 'Sync started'
@@ -104,7 +108,7 @@ function normalizeSyncResult(raw: any, id: string): SyncResult {
   // Derive a tolerant status then cast once
   out.status =
     raw.status ??
-    (raw.completedAt || raw.completed ? 'completed' : 'started') // <- tolerant literals
+    (raw.completedAt || raw.completed ? 'completed' : 'started')
 
   out.startedAt = toIso(raw.startedAt) ?? toIso(raw.started) ?? toIso(raw.timestamp)
   out.completedAt = toIso(raw.completedAt) ?? toIso(raw.completed)
@@ -185,74 +189,75 @@ export const dataSourcesApi = {
    * Azure gateway & data-service accept: { type, config }
    * Also include `connectionConfig` for backward compatibility.
    */
-  // ⬇️ replace the previous testConfig() with this version
-async testConfig(
-  type: DataSourceType,
-  connectionConfig: ConnectionConfig,
-  signal?: AbortSignal
-) {
-  // Some gateways expose /data-sources/test, others /connections/test,
-  // some legacy UIs used /data-sources/test-connection. Try them in order.
-  const body = { type, config: connectionConfig, connectionConfig };
+  async testConfig(
+    type: DataSourceType,
+    connectionConfig: ConnectionConfig,
+    signal?: AbortSignal
+  ) {
+    // Some gateways expose /data-sources/test, others /connections/test,
+    // some legacy UIs used /data-sources/test-connection. Try them in order.
+    const body = { type, config: connectionConfig, connectionConfig }
 
-  const candidates = [
-    { method: 'post' as const, url: '/data-sources/test' },
-    { method: 'post' as const, url: '/connections/test' },
-    { method: 'post' as const, url: '/data-sources/test-connection' },
-  ];
+    const candidates = [
+      { method: 'post' as const, url: '/data-sources/test' },
+      { method: 'post' as const, url: '/connections/test' },
+      { method: 'post' as const, url: '/data-sources/test-connection' },
+    ]
 
-  let lastErr: unknown;
-  for (const c of candidates) {
-    try {
-      const res = await http[c.method]<ConnectionTestResult>(c.url, body, { signal });
-      return normalizeTestResult(res.data);
-    } catch (e: any) {
-      // try next only on 404/405; otherwise rethrow
-      const status = e?.response?.status ?? e?.status;
-      if (status !== 404 && status !== 405) throw e;
-      lastErr = e;
+    let lastErr: unknown
+    for (const c of candidates) {
+      try {
+        const res = await http[c.method]<ConnectionTestResult>(c.url, body, { signal })
+        return normalizeTestResult(res.data)
+      } catch (e: any) {
+        // try next only on 404/405; otherwise rethrow
+        const status = e?.response?.status ?? e?.status
+        if (status !== 404 && status !== 405) throw e
+        lastErr = e
+      }
     }
-  }
-  // if all failed, surface the last error
-  throw lastErr ?? new Error('No test endpoint available');
-},
+    // if all failed, surface the last error
+    throw lastErr ?? new Error('No test endpoint available')
+  },
 
-// ⬇️ replace the previous previewDatabases() with this version
-async previewDatabases(
-  type: DataSourceType,
-  connectionConfig: ConnectionConfig,
-  signal?: AbortSignal
-) {
-  const body = { type, config: connectionConfig, connectionConfig };
+  /**
+   * Preview/discover databases (server-scope connectors).
+   * Tries multiple endpoints for compatibility.
+   */
+  async previewDatabases(
+    type: DataSourceType,
+    connectionConfig: ConnectionConfig,
+    signal?: AbortSignal
+  ) {
+    const body = { type, config: connectionConfig, connectionConfig }
 
-  const candidates = [
-    { method: 'post' as const, url: '/data-sources/databases/preview' },
-    { method: 'post' as const, url: '/connections/discover' },
-    { method: 'post' as const, url: '/data-sources/discover' },
-  ];
+    const candidates = [
+      { method: 'post' as const, url: '/data-sources/databases/preview' },
+      { method: 'post' as const, url: '/connections/discover' },
+      { method: 'post' as const, url: '/data-sources/discover' },
+    ]
 
-  let lastErr: unknown;
-  for (const c of candidates) {
-    try {
-      const { data } = await http[c.method]<{ databases?: any[]; metadata?: any }>(
-        c.url,
-        body,
-        { signal }
-      );
-      return {
-        databases: Array.isArray(data?.databases) ? data.databases : [],
-        metadata: data?.metadata,
-      };
-    } catch (e: any) {
-      const status = e?.response?.status ?? e?.status;
-      if (status !== 404 && status !== 405) throw e;
-      lastErr = e;
+    let lastErr: unknown
+    for (const c of candidates) {
+      try {
+        const { data } = await http[c.method]<{ databases?: any[]; metadata?: any }>(
+          c.url,
+          body,
+          { signal }
+        )
+        return {
+          databases: Array.isArray(data?.databases) ? data.databases : [],
+          metadata: data?.metadata,
+        }
+      } catch (e: any) {
+        const status = e?.response?.status ?? e?.status
+        if (status !== 404 && status !== 405) throw e
+        lastErr = e
+      }
     }
-  }
-  // graceful fallback
-  return { databases: [], metadata: undefined };
-},
-
+    // graceful fallback
+    return { databases: [], metadata: undefined }
+  },
 
   async sync(id: string) {
     const res = await http.post<SyncResult>(`/data-sources/${id}/sync`)
@@ -409,7 +414,6 @@ export const healthApi = {
 
 export const dataSourceUtils = {
   getTypeDisplayName(type: DataSourceType): string {
-    // Partial map to avoid breaking when DataSourceType has many variants
     const displayNames: Partial<Record<DataSourceType, string>> = {
       postgresql: 'PostgreSQL',
       mysql: 'MySQL',
@@ -505,8 +509,14 @@ export const dataSourceUtils = {
 export async function listDataSources(params: ListDataSourcesParams = {}) {
   return dataSourcesApi.list(params)
 }
+export async function getDataSource(id: string) {
+  return dataSourcesApi.getById(id)
+}
 export async function createDataSource(payload: CreateDataSourcePayload) {
   return dataSourcesApi.create(payload)
+}
+export async function updateDataSource(id: string, payload: UpdateDataSourcePayload) {
+  return dataSourcesApi.update(id, payload)
 }
 export async function deleteDataSource(id: string) {
   return dataSourcesApi.delete(id)
@@ -522,11 +532,11 @@ export async function listDataSourceDatabases(id: string) {
 }
 
 /** Optional helpers used by your wizard */
-export async function testDataSourceConfig(type: DataSourceType, config: ConnectionConfig) {
-  return dataSourcesApi.testConfig(type, config)
+export async function testDataSourceConfig(type: DataSourceType, config: ConnectionConfig, signal?: AbortSignal) {
+  return dataSourcesApi.testConfig(type, config, signal)
 }
-export async function previewDataSourceDatabases(type: DataSourceType, config: ConnectionConfig) {
-  return dataSourcesApi.previewDatabases(type, config)
+export async function previewDataSourceDatabases(type: DataSourceType, config: ConnectionConfig, signal?: AbortSignal) {
+  return dataSourcesApi.previewDatabases(type, config, signal)
 }
 
 export default {

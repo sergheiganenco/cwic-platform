@@ -156,6 +156,7 @@ export interface BaseConnectionConfig {
   port?: number;
   database?: string;
   schema?: string;
+  connectionString?: string;
   
   // Authentication
   username?: string;
@@ -266,6 +267,7 @@ export interface OracleConfig extends BaseConnectionConfig {
   sid?: string;
   tnsAdmin?: string;
   walletLocation?: string;
+  connectString?: string;
   
   // Connection options
   privilege?: 'NORMAL' | 'SYSDBA' | 'SYSOPER';

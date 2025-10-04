@@ -1,15 +1,17 @@
-﻿// src/main.tsx
+﻿﻿// src/main.tsx
+import ErrorBoundary from '@/components/common/ErrorBoundary'
+import LoadingSpinner from '@/components/common/LoadingSpinner'
+import { ToastProvider, Toaster } from '@/components/ui/Notification'
+import { http } from '@/services/http'
+import '@/styles/components.css'; // optional
+import '@/styles/globals.css'; // if you have one
+import '@/styles/tailwind.css'
+import { AuthProvider } from '@hooks/useAuth'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { Provider } from 'react-redux'
-
-import ErrorBoundary from '@/components/common/ErrorBoundary'
-import LoadingSpinner from '@/components/common/LoadingSpinner'
-import { ToastProvider, Toaster } from '@/components/ui/Notification'
-import { http } from '@/services/http'
-import { AuthProvider } from '@hooks/useAuth'
 import AppRouter from './routes/router'
 import { store } from './store/store'
 

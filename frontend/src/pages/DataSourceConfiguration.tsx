@@ -1,12 +1,12 @@
 // src/pages/DataSourceConfiguration.tsx
-import { AlertTriangle, ArrowLeft, CheckCircle, Database, Save, TestTube, Trash2 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { AlertTriangle, ArrowLeft, CheckCircle, Database, Save, TestTube, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 
-import { Button } from '@/components/ui/Button'
-import { env } from '@/config/environment'
-import { useDataSources } from '@/hooks/useDataSources'
-import type { ConnectionConfig, DataSource } from '@/types/dataSources'
+import { Button } from '@/components/ui/Button';
+import { env } from '@/config/environment';
+import { useDataSources } from '@/hooks/useDataSources';
+import type { ConnectionConfig, DataSource } from '@/types/dataSources';
 
 export default function DataSourceConfigurationPage() {
   const { id } = useParams<{ id: string }>()

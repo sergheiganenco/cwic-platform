@@ -8,6 +8,7 @@ import type {
   PaginationInfo
 } from '@/types/dataAssets';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { debounce } from '@/utils/performanceUtils';
 
 // ---------- API response types ----------
 interface AssetsApiResponse {
@@ -167,6 +168,8 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
   const abortControllerRef = useRef<AbortController | null>(null);
   const lastRequestRef = useRef<string>('');
   const offlineTimerRef = useRef<number | null>(null); // debounce noisy offline flips
+  const lastFetchTime = useRef<number>(0);
+  const MIN_FETCH_INTERVAL = 5000; // Minimum 5 seconds between fetches
 
   // ---------- QS builder ----------
   const createQueryString = useCallback((current: AssetFilters): string => {
@@ -195,7 +198,14 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
 
   // ---------- Core fetch ----------
   const fetchAssets = useCallback(
-    async (showLoading = true) => {
+    async (showLoading = true, force = false) => {
+      // Prevent too frequent refreshes unless forced
+      const now = Date.now();
+      if (!force && now - lastFetchTime.current < MIN_FETCH_INTERVAL) {
+        return;
+      }
+      lastFetchTime.current = now;
+
       // Cancel any in-flight request
       if (abortControllerRef.current) abortControllerRef.current.abort();
 
@@ -331,7 +341,7 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
 
   const refresh = useCallback(async () => {
     setRetryCount(0);
-    await fetchAssets(true);
+    await fetchAssets(true, true); // Force refresh
   }, [fetchAssets]);
 
   // ---------- Access request ----------
@@ -369,14 +379,28 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
     fetchAssets(false);
   }, [fetchAssets]);
 
+  // Debounced version for filter changes
+  const debouncedFetch = useMemo(
+    () => debounce(() => fetchAssets(true, false), 500),
+    [fetchAssets]
+  );
+
   // ---------- Effects ----------
+  // Initial fetch on mount
   useEffect(() => {
     if (!autoFetch) return;
 
-    const delay = import.meta.env.MODE === 'development' ? 1000 : 0;
-    const t = setTimeout(() => fetchAssets(true), delay);
+    const delay = import.meta.env.MODE === 'development' ? 200 : 100;
+    const t = setTimeout(() => fetchAssets(true, false), delay);
     return () => clearTimeout(t);
-  }, [filters, autoFetch, fetchAssets]);
+  }, []); // Only on mount
+
+  // Fetch when filters change (debounced)
+  useEffect(() => {
+    if (!autoFetch || lastFetchTime.current === 0) return; // Skip on initial mount
+
+    debouncedFetch();
+  }, [filters, autoFetch, debouncedFetch]);
 
   useEffect(() => {
     if (refreshInterval > 0 && import.meta.env.MODE !== 'development') {

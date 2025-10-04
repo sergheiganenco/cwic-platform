@@ -15,8 +15,6 @@
     "typecheck": "npm run typecheck:all",
     "format": "npm run format:all",
     "format:fix": "npm run format:fix:all",
-
-
     "dev:all": "concurrently -c auto -n FRONTEND,BACKEND \"npm run -w frontend dev\" \"npm run -ws backend --if-present dev\"",
     "build:all": "npm run -w frontend build && npm run -ws backend --if-present build",
     "lint:all": "npm run -w frontend lint && npm run -ws backend --if-present lint",
@@ -28,7 +26,6 @@
     "build:frontend": "npm run -w frontend build",
     "lint:frontend": "npm run -w frontend lint",
     "typecheck:frontend": "npm run -w frontend typecheck",
-
     "dev:backend": "npm run -ws backend --if-present dev",
     "build:backend": "npm run -ws backend --if-present build",
     "lint:backend": "npm run -ws backend --if-present lint",
@@ -52,21 +49,27 @@
   "author": "Your Company",
   "license": "MIT",
   "devDependencies": {
-    "@types/express": "^4.17.23",
-    "@types/express-serve-static-core": "^4.19.6",
-    "@types/node": "^24.6.0",
-    "@types/react": "^19.1.16",
-    "@types/react-dom": "^19.1.9",
-    "concurrently": "^8.2.0",
-    "cross-env": "^7.0.3",
-    "cross-env-shell": "^7.0.3",
-    "eslint": "^8.57.1",
-    "prettier": "^3.6.2",
-    "typescript": "^5.9.3",
-    "vite": "^7.1.7"
+    "@types/express": "4.17.23",
+    "@types/express-serve-static-core": "4.19.6",
+    "@types/node": "24.6.0",
+    "@types/react": "18.3.7",
+    "@types/react-dom": "18.3.7",
+    "concurrently": "8.2.0",
+    "cross-env": "7.0.3",
+    "cross-env-shell": "7.0.3",
+    "eslint": "8.57.1",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3",
+    "vite": "7.1.7"
   },
   "dependencies": {
-    "bullmq": "^5.58.5",
-    "ioredis": "^5.7.0"
+    "bullmq": "5.58.5",
+    "ioredis": "5.7.0"
+  },
+  "overrides": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@types/react": "18.3.7",
+    "@types/react-dom": "18.3.7"
   }
 }
