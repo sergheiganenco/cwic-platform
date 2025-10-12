@@ -15,6 +15,9 @@ import { logger } from './utils/logger';
 
 // Routes
 import assetRoutes from './routes/assets';
+import catalogRoutes from './routes/catalog';
+import { initAdvancedCatalog } from './routes/advancedCatalog';
+import initEnhancedCatalog from './routes/catalogEnhanced';
 import dataSourceRoutes from './routes/dataSources';
 import governanceRoutes from './routes/governance';
 import lineageRoutes from './routes/lineage';
@@ -226,7 +229,12 @@ export default class App {
     // Readiness check
     this.app.get('/ready', async (_req, res) => {
       try {
-        const maybe = (this.db as any).isReady?.() ?? this.db.healthCheck();
+        let maybe;
+        if (typeof (this.db as any).isReady === 'function') {
+          maybe = (this.db as any).isReady();
+        } else {
+          maybe = this.db.healthCheck();
+        }
         const raw = await Promise.resolve(maybe as unknown);
         const isReady = healthToBoolean(raw);
         if (!isReady) throw new Error('Database not ready');
@@ -241,6 +249,19 @@ export default class App {
         });
       }
     });
+
+    // Mount catalog routes FIRST (they have specific /data-sources/:id/sync that should override)
+    this.app.use(catalogRoutes);
+
+    // Mount advanced catalog routes
+    const advancedCatalogRouter = initAdvancedCatalog(this.db.pool);
+    this.app.use('/api/advanced-catalog', advancedCatalogRouter);
+    this.app.use('/advanced-catalog', advancedCatalogRouter);
+
+    // Mount enhanced catalog routes (collaboration, ratings, etc.)
+    const enhancedCatalogRouter = initEnhancedCatalog(this.db.pool);
+    this.app.use('/api', enhancedCatalogRouter);
+    this.app.use(enhancedCatalogRouter);
 
     // Mount routes with both /api prefix and without (gateway flexibility)
     const routes = [

@@ -75,7 +75,7 @@ const normalizeListParams: RequestHandler = (req, _res, next) => {
 /* Rate limits                                                                */
 /* -------------------------------------------------------------------------- */
 
-const listLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 100 }));
+const listLimit    = asHandler(createRateLimit({ windowMs: 60_000, max: 500 }));
 const healthLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 60  }));
 const getByIdLimit = asHandler(createRateLimit({ windowMs: 60_000, max: 200 }));
 const schemaLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 30  }));
@@ -93,38 +93,28 @@ const deleteLimit  = asHandler(createRateLimit({ windowMs: 60_000, max: 10  }));
 const validateConnectionConfig = () => {
   return body().custom((value, { req }) => {
     // Log what we're receiving for debugging
-    console.log('🔍 Full request body received:', JSON.stringify(req.body, null, 2));
     
     // API Gateway transforms 'config' to 'connection', so we check both
     const config = req.body?.config || req.body?.connection;
     
-    console.log('🔍 Backend validating config/connection:', JSON.stringify(config, null, 2));
-    console.log('🔍 Config type:', typeof config);
-    console.log('🔍 Config is array:', Array.isArray(config));
-    console.log('🔍 Config is null:', config === null);
     
     // Basic checks
     if (config === undefined) {
-      console.log('❌ Config/connection is undefined');
       throw new Error('Connection config is required');
     }
     
     if (config === null) {
-      console.log('❌ Config/connection is null');
       throw new Error('Connection config cannot be null');
     }
     
     if (typeof config !== 'object') {
-      console.log('❌ Config/connection is not an object, type:', typeof config);
       throw new Error('Connection config must be an object');
     }
     
     if (Array.isArray(config)) {
-      console.log('❌ Config/connection is an array');
       throw new Error('Connection config cannot be an array');
     }
     
-    console.log('✅ Connection config validation passed');
     return true;
   });
 };

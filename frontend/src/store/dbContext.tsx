@@ -122,7 +122,7 @@ export const DbProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       // IMPORTANT: keep endpoint consistent with the rest of your app:
       // services/api/dataSources.ts uses '/data-sources'
-      const list = await api.get<DataSourceServer[]>('/data-sources', { signal: ctrl.signal })
+      const list = await api.get<PaginatedDataSources>('/api/data-sources', { signal: ctrl.signal })
       setServers(Array.isArray(list) ? list : [])
       setStatus('ready')
     } catch (e: any) {
@@ -160,7 +160,7 @@ export const DbProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         // Keep endpoint consistent with backend (recommend):
         // GET /data-sources/:id/databases  -> [{ name, owner, createdAt }]
         const list = await api.get<DatabaseItem[]>(
-          `/data-sources/${encodeURIComponent(serverId)}/databases`,
+          `/api/data-sources/${encodeURIComponent(serverId)}/databases`,
           { signal: ctrl.signal },
         )
         setDatabases(Array.isArray(list) ? list : [])
@@ -179,16 +179,22 @@ export const DbProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     [api, useMocks, cancelInFlight],
   )
 
-  // initial server load
+  // initial server load - run only once on mount
   React.useEffect(() => {
     refreshServers()
-    return () => cancelInFlight()
-  }, [refreshServers, cancelInFlight])
+    return () => {
+      abortRef.current?.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // auto-load databases when a server is selected (e.g., from persisted selection)
   React.useEffect(() => {
-    if (selection?.serverId) refreshDatabases(selection.serverId)
-  }, [selection?.serverId, refreshDatabases])
+    if (selection?.serverId) {
+      refreshDatabases(selection.serverId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection?.serverId])
 
   const setServer = React.useCallback((serverId: string | null) => {
     setDatabases([])
