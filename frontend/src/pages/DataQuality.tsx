@@ -42,6 +42,8 @@ import {
   CheckSquare,
   Square,
   Loader2,
+  BookOpen,
+  X,
 } from 'lucide-react';
 
 import { Button } from '@components/ui/Button';
@@ -61,7 +63,8 @@ import type {
   QualityIssue,
   QualityTrend,
   ScanResult,
-  RuleExecutionResult
+  RuleExecutionResult,
+  RuleTemplate
 } from '@services/api/quality';
 
 // ============================================================================
@@ -107,9 +110,22 @@ export const DataQuality: React.FC = () => {
   const [selectedRules, setSelectedRules] = useState<Set<string>>(new Set());
   const [editingRule, setEditingRule] = useState<QualityRule | null>(null);
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
+  const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [profileFilter, setProfileFilter] = useState<string>('');
+  const [ruleFilter, setRuleFilter] = useState<{ search: string; severity: string; status: string }>({
+    search: '',
+    severity: '',
+    status: ''
+  });
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [templates, setTemplates] = useState<RuleTemplate[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<RuleTemplate | null>(null);
+  const [templateParams, setTemplateParams] = useState<Record<string, any>>({});
+  const [availableTables, setAvailableTables] = useState<Array<{ schema: string; table: string; fullName: string }>>([]);
+  const [availableColumns, setAvailableColumns] = useState<Array<{ name: string; type: string }>>([]);
 
   // Hooks
-  const { items: dataSources, isLoading: loadingDataSources } = useDataSources();
+  const { items: dataSources } = useDataSources();
   const { data: summary, refresh: refreshSummary } = useQualitySummary({
     timeframe: '7d',
     filters: selectedDataSourceId ? { dataSourceId: selectedDataSourceId } : {},
@@ -198,9 +214,14 @@ export const DataQuality: React.FC = () => {
   // PROFILING FUNCTIONS
   // ============================================================================
 
+  const showToast = (type: 'success' | 'error' | 'info', message: string) => {
+    setToastMessage({ type, message });
+    setTimeout(() => setToastMessage(null), 5000);
+  };
+
   const startProfiling = async () => {
     if (!selectedDataSourceId) {
-      alert('Please select a data source first');
+      showToast('error', 'Please select a data source first');
       return;
     }
 
@@ -256,46 +277,113 @@ export const DataQuality: React.FC = () => {
 
       // Show success message
       const avgScore = response.averageQualityScore || 0;
-      alert(
-        `✅ Profiling complete!\n\n` +
-        `• Total tables: ${profileCount}\n` +
-        `• Successfully profiled: ${successfulProfilesCount}\n` +
-        `• Failed: ${failedProfiles}\n` +
-        `• Average quality score: ${avgScore}%\n\n` +
-        `${failedProfiles > 0 ? 'Some tables failed to profile. Check logs for details.' : 'All tables profiled successfully!'}`
+      showToast(
+        'success',
+        `Profiling complete! ${successfulProfilesCount}/${profileCount} tables profiled successfully. Average quality score: ${avgScore}%`
       );
     } catch (error: any) {
       console.error('Profiling failed:', error);
-      alert(`❌ Profiling failed: ${error.message || 'Unknown error'}. Please check the logs and try again.`);
+      showToast('error', `Profiling failed: ${error.message || 'Unknown error'}. Please check the logs and try again.`);
       setProfilingStatus('idle');
       setProfilingProgress(null);
     }
   };
 
+  const generateSQLExpression = (suggestion: any, profile: AssetProfile): string => {
+    const { config, ruleType, dimension } = suggestion;
+    const tableName = profile.assetName; // e.g., "public.users"
+
+    // Generate SQL based on rule type
+    if (ruleType === 'threshold' && config.metric === 'null_rate') {
+      // Null rate check
+      return `SELECT
+  COUNT(*) FILTER (WHERE ${config.columnName} IS NULL)::float / NULLIF(COUNT(*), 0) * 100 < ${config.value * 100} as passed,
+  COUNT(*) as total_rows,
+  COUNT(*) FILTER (WHERE ${config.columnName} IS NULL) as null_rows
+FROM ${tableName}`;
+    }
+
+    if (ruleType === 'threshold' && config.metric === 'unique_rate') {
+      // Uniqueness check
+      return `SELECT
+  COUNT(DISTINCT ${config.columnName})::float / NULLIF(COUNT(*), 0) >= ${config.value} as passed,
+  COUNT(DISTINCT ${config.columnName}) as distinct_count,
+  COUNT(*) as total_rows
+FROM ${tableName}`;
+    }
+
+    if (ruleType === 'pattern' && config.pattern) {
+      // Pattern validation (e.g., email)
+      return `SELECT
+  COUNT(*) FILTER (WHERE ${config.columnName} !~ '${config.pattern}')::float / NULLIF(COUNT(*), 0) < 0.05 as passed,
+  COUNT(*) FILTER (WHERE ${config.columnName} !~ '${config.pattern}') as invalid_count,
+  COUNT(*) as total_rows
+FROM ${tableName}
+WHERE ${config.columnName} IS NOT NULL`;
+    }
+
+    // Default generic check
+    return `SELECT
+  TRUE as passed,
+  '${suggestion.name}' as rule_name,
+  'Manual configuration required' as message
+FROM ${tableName}
+LIMIT 1`;
+  };
+
   const generateRulesFromProfile = async (profiles: AssetProfile[]) => {
     const newRules: QualityRule[] = [];
+    let successCount = 0;
+    let errorCount = 0;
 
     for (const profile of profiles) {
-      const suggestions = await qualityAPI.getProfileSuggestions(profile.assetId);
+      try {
+        const suggestions = await qualityAPI.getProfileSuggestions(profile.assetId);
 
-      for (const suggestion of suggestions) {
-        const rule = await qualityAPI.createRule({
-          name: suggestion.name,
-          description: suggestion.description,
-          dimension: suggestion.dimension,
-          severity: suggestion.severity as any,
-          ruleType: suggestion.ruleType,
-          ruleConfig: suggestion.config,
-          assetId: profile.assetId,
-          dataSourceId: selectedDataSourceId,
-          enabled: false,
-        });
+        if (!suggestions || suggestions.length === 0) {
+          console.log(`No suggestions found for asset ${profile.assetName}`);
+          continue;
+        }
 
-        newRules.push(rule);
+        for (const suggestion of suggestions) {
+          try {
+            // Generate SQL expression based on suggestion type
+            const sqlExpression = generateSQLExpression(suggestion, profile);
+
+            // Map the suggestion to the backend expected format
+            const rulePayload = {
+              name: suggestion.name,
+              description: suggestion.description,
+              severity: suggestion.severity,
+              type: 'sql',
+              dialect: 'postgres',
+              expression: sqlExpression,
+              tags: ['auto-generated', suggestion.dimension, profile.assetName],
+              enabled: false,
+            };
+
+            const rule = await qualityAPI.createRule(rulePayload);
+            newRules.push(rule);
+            successCount++;
+          } catch (ruleError: any) {
+            console.error(`Failed to create rule "${suggestion.name}":`, ruleError.message);
+            errorCount++;
+          }
+        }
+      } catch (error: any) {
+        console.error(`Failed to get suggestions for asset ${profile.assetName}:`, error.message);
+        errorCount++;
       }
     }
 
     setRules(prevRules => [...prevRules, ...newRules]);
+
+    // Show summary
+    if (successCount > 0) {
+      showToast('success', `Generated ${successCount} quality rules${errorCount > 0 ? ` (${errorCount} failed)` : ''}`);
+    } else if (errorCount > 0) {
+      showToast('error', `Failed to generate rules. Check console for details.`);
+    }
   };
 
   // ============================================================================
@@ -304,7 +392,7 @@ export const DataQuality: React.FC = () => {
 
   const startScanning = async () => {
     if (!selectedDataSourceId) {
-      alert('Please select a data source first');
+      showToast('error', 'Please select a data source first');
       return;
     }
 
@@ -315,15 +403,178 @@ export const DataQuality: React.FC = () => {
         ? Array.from(selectedRules)
         : rules.filter(r => r.enabled).map(r => r.id);
 
+      if (ruleIds.length === 0) {
+        showToast('error', 'No rules selected or enabled for scanning');
+        setScanningStatus('idle');
+        return;
+      }
+
       const result = await qualityAPI.scanDataSource(selectedDataSourceId, ruleIds);
       setScanResult(result);
       setScanningStatus('complete');
+
+      showToast('success', `Scan complete: ${result.passed} passed, ${result.failed} failed`);
 
       // Refresh issues after scan
       await loadIssues();
     } catch (error) {
       console.error('Scanning failed:', error);
+      showToast('error', 'Scanning failed. Please try again.');
       setScanningStatus('idle');
+    }
+  };
+
+  // ============================================================================
+  // TEMPLATE MANAGEMENT
+  // ============================================================================
+
+  const loadTemplates = async () => {
+    setLoadingStates(prev => ({ ...prev, templates: true }));
+    try {
+      const fetchedTemplates = await qualityAPI.getRuleTemplates();
+      setTemplates(fetchedTemplates);
+    } catch (error) {
+      console.error('Failed to load templates:', error);
+      showToast('error', 'Failed to load rule templates');
+    } finally {
+      setLoadingStates(prev => ({ ...prev, templates: false }));
+    }
+  };
+
+  const loadAvailableTables = async () => {
+    if (!selectedDataSourceId) return;
+
+    setLoadingStates(prev => ({ ...prev, loadingTables: true }));
+    try {
+      // Fetch tables from catalog
+      const response = await fetch(`/api/catalog/assets?dataSourceId=${selectedDataSourceId}&type=table&limit=1000`);
+      if (!response.ok) throw new Error('Failed to fetch tables');
+
+      const data = await response.json();
+
+      // Filter and map tables, handling undefined values
+      const tables = data.data.assets
+        .filter((asset: any) => asset.schema && asset.table)
+        .map((asset: any) => ({
+          schema: asset.schema,
+          table: asset.table,
+          fullName: `${asset.schema}.${asset.table}`
+        }));
+
+      setAvailableTables(tables);
+
+      console.log(`Loaded ${tables.length} tables from data source:`, tables.slice(0, 5));
+
+      if (tables.length === 0) {
+        showToast('info', 'No tables found in this data source');
+      }
+    } catch (error) {
+      console.error('Failed to load tables:', error);
+      showToast('error', 'Failed to load available tables');
+    } finally {
+      setLoadingStates(prev => ({ ...prev, loadingTables: false }));
+    }
+  };
+
+  const loadAvailableColumns = async (tableName: string) => {
+    if (!selectedDataSourceId || !tableName) return;
+
+    setLoadingStates(prev => ({ ...prev, loadingColumns: true }));
+    try {
+      // Parse schema and table from fullName (e.g., "dbo.Users" or "public.users")
+      const [schema, table] = tableName.includes('.')
+        ? tableName.split('.')
+        : ['public', tableName];
+
+      // Find the asset from our loaded tables
+      const matchingTable = availableTables.find(t => t.schema === schema && t.table === table);
+
+      if (matchingTable) {
+        // Fetch columns directly from catalog using the full table info
+        const response = await fetch(`/api/catalog/assets?dataSourceId=${selectedDataSourceId}&schema=${schema}&table=${table}&limit=1`);
+        if (!response.ok) throw new Error('Failed to fetch asset');
+
+        const data = await response.json();
+        const asset = data.data.assets[0];
+
+        if (asset && asset.id) {
+          // Fetch detailed asset info with columns
+          const detailResponse = await fetch(`/api/catalog/assets/${asset.id}`);
+          if (!detailResponse.ok) throw new Error('Failed to fetch columns');
+
+          const detailData = await detailResponse.json();
+          const columns = detailData.data.columns || [];
+
+          const mappedColumns = columns.map((col: any) => ({
+            name: col.column_name || col.name,
+            type: col.data_type || col.type || 'unknown'
+          }));
+
+          setAvailableColumns(mappedColumns);
+
+          if (mappedColumns.length === 0) {
+            showToast('info', 'No columns found for this table');
+          }
+        } else {
+          showToast('error', 'Could not find table details');
+        }
+      } else {
+        showToast('error', 'Table not found in catalog');
+      }
+    } catch (error) {
+      console.error('Failed to load columns:', error);
+      showToast('error', 'Failed to load columns for selected table');
+      setAvailableColumns([]);
+    } finally {
+      setLoadingStates(prev => ({ ...prev, loadingColumns: false }));
+    }
+  };
+
+  const openTemplates = async () => {
+    if (!selectedDataSourceId) {
+      showToast('info', 'Please select a data source first to browse templates');
+      return;
+    }
+
+    setShowTemplates(true);
+    if (templates.length === 0) {
+      await loadTemplates();
+    }
+    if (availableTables.length === 0) {
+      await loadAvailableTables();
+    }
+  };
+
+  const applyTemplate = async () => {
+    if (!selectedTemplate) return;
+
+    // Validate required parameters
+    const missingParams = selectedTemplate.parameters
+      .filter(p => p.required && !templateParams[p.name])
+      .map(p => p.name);
+
+    if (missingParams.length > 0) {
+      showToast('error', `Missing required parameters: ${missingParams.join(', ')}`);
+      return;
+    }
+
+    setLoadingStates(prev => ({ ...prev, applyingTemplate: true }));
+
+    try {
+      const createdRule = await qualityAPI.applyRuleTemplate(selectedTemplate.id, templateParams);
+      setRules(prev => [createdRule, ...prev]);
+
+      // Reset template state
+      setSelectedTemplate(null);
+      setTemplateParams({});
+      setShowTemplates(false);
+
+      showToast('success', `Rule "${createdRule.name}" created from template!`);
+    } catch (error) {
+      console.error('Failed to apply template:', error);
+      showToast('error', 'Failed to create rule from template');
+    } finally {
+      setLoadingStates(prev => ({ ...prev, applyingTemplate: false }));
     }
   };
 
@@ -333,12 +584,12 @@ export const DataQuality: React.FC = () => {
 
   const generateRuleFromAI = async () => {
     if (!aiPrompt.trim()) {
-      alert('Please enter a description of the quality check you want to create');
+      showToast('error', 'Please enter a description of the quality check you want to create');
       return;
     }
 
     if (!selectedDataSourceId) {
-      alert('Please select a data source first');
+      showToast('error', 'Please select a data source first');
       return;
     }
 
@@ -352,10 +603,10 @@ export const DataQuality: React.FC = () => {
       setRules(prev => [generatedRule, ...prev]);
       setAiPrompt('');
 
-      alert(`✅ Rule "${generatedRule.name}" created successfully! You can now enable and run it.`);
+      showToast('success', `Rule "${generatedRule.name}" created successfully! You can now enable and run it.`);
     } catch (error) {
       console.error('AI rule generation failed:', error);
-      alert('Failed to generate rule. Please try rephrasing your request.');
+      showToast('error', 'Failed to generate rule. Please try rephrasing your request.');
     } finally {
       setLoadingStates(prev => ({ ...prev, aiGeneration: false }));
     }
@@ -368,8 +619,10 @@ export const DataQuality: React.FC = () => {
       });
 
       setRules(prev => prev.map(r => r.id === rule.id ? updated : r));
+      showToast('success', `Rule ${updated.enabled ? 'enabled' : 'disabled'} successfully`);
     } catch (error) {
       console.error('Failed to toggle rule:', error);
+      showToast('error', 'Failed to update rule status');
     }
   };
 
@@ -379,8 +632,10 @@ export const DataQuality: React.FC = () => {
     try {
       await qualityAPI.deleteRule(ruleId);
       setRules(prev => prev.filter(r => r.id !== ruleId));
+      showToast('success', 'Rule deleted successfully');
     } catch (error) {
       console.error('Failed to delete rule:', error);
+      showToast('error', 'Failed to delete rule');
     }
   };
 
@@ -405,9 +660,14 @@ export const DataQuality: React.FC = () => {
       }));
 
       // Show result
-      alert(`Rule execution ${result.status}: ${result.metricValue || 0}/${result.thresholdValue || 100}`);
+      if (result.status === 'passed') {
+        showToast('success', `Rule passed: ${result.metricValue || 0}/${result.thresholdValue || 100}`);
+      } else {
+        showToast('error', `Rule failed: ${result.metricValue || 0}/${result.thresholdValue || 100}`);
+      }
     } catch (error) {
       console.error('Failed to execute rule:', error);
+      showToast('error', 'Failed to execute rule');
     } finally {
       setLoadingStates(prev => ({ ...prev, [`rule-${rule.id}`]: false }));
     }
@@ -424,8 +684,11 @@ export const DataQuality: React.FC = () => {
       setIssues(prev => prev.map(i =>
         i.id === issue.id ? { ...i, status: newStatus as any } : i
       ));
+
+      showToast('success', `Issue status updated to ${newStatus}`);
     } catch (error) {
       console.error('Failed to update issue status:', error);
+      showToast('error', 'Failed to update issue status');
     }
   };
 
@@ -777,8 +1040,22 @@ export const DataQuality: React.FC = () => {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center justify-between">
-              <span>Profiled Assets</span>
-              <Badge variant="secondary">{profiledAssets.length} assets</Badge>
+              <div className="flex items-center gap-4">
+                <span>Profiled Assets</span>
+                <Badge variant="secondary">{profiledAssets.length} assets</Badge>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Filter assets..."
+                    value={profileFilter}
+                    onChange={(e) => setProfileFilter(e.target.value)}
+                    className="pl-10 pr-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -795,7 +1072,12 @@ export const DataQuality: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {profiledAssets.map((asset) => (
+                  {profiledAssets
+                    .filter(asset =>
+                      profileFilter === '' ||
+                      asset.assetName.toLowerCase().includes(profileFilter.toLowerCase())
+                    )
+                    .map((asset) => (
                     <tr key={asset.assetId} className="border-b hover:bg-gray-50">
                       <td className="py-3 font-medium">{asset.assetName}</td>
                       <td className="py-3">{asset.rowCount.toLocaleString()}</td>
@@ -813,20 +1095,55 @@ export const DataQuality: React.FC = () => {
                       </td>
                       <td className="py-3">
                         <div className="flex gap-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setSelectedAsset(asset)}
-                          >
-                            <Eye className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => generateRulesFromProfile([asset])}
-                          >
-                            <Wand2 className="h-4 w-4" />
-                          </Button>
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setSelectedAsset(asset)}
+                                  className="h-8 w-8 p-0"
+                                >
+                                  <Eye className="h-4 w-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p>View Details</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={async () => {
+                                    try {
+                                      setLoadingStates(prev => ({ ...prev, [`gen-${asset.assetId}`]: true }));
+                                      await generateRulesFromProfile([asset]);
+                                      showToast('success', `Generated quality rules for ${asset.assetName}`);
+                                    } catch (error) {
+                                      showToast('error', 'Failed to generate rules');
+                                    } finally {
+                                      setLoadingStates(prev => ({ ...prev, [`gen-${asset.assetId}`]: false }));
+                                    }
+                                  }}
+                                  disabled={loadingStates[`gen-${asset.assetId}`]}
+                                  className="h-8 w-8 p-0"
+                                >
+                                  {loadingStates[`gen-${asset.assetId}`] ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Wand2 className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p>Generate Quality Rules</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
                         </div>
                       </td>
                     </tr>
@@ -943,6 +1260,253 @@ export const DataQuality: React.FC = () => {
               )}
               Generate Rule
             </Button>
+            <Button
+              onClick={openTemplates}
+              variant="outline"
+              className="border-purple-300 text-purple-700 hover:bg-purple-50"
+            >
+              <BookOpen className="mr-2 h-4 w-4" />
+              Browse Templates
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Template Browser Modal */}
+      {showTemplates && (
+        <Card className="border-2 border-green-200 bg-white">
+          <CardHeader className="border-b">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <BookOpen className="h-5 w-5 text-green-600" />
+                  Rule Template Library
+                </CardTitle>
+                <p className="text-sm text-gray-600 mt-1">
+                  Industry-standard quality checks based on best practices
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setShowTemplates(false);
+                  setSelectedTemplate(null);
+                  setTemplateParams({});
+                  setAvailableColumns([]);
+                }}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="p-6">
+            {loadingStates.templates ? (
+              <div className="text-center py-8">
+                <Loader2 className="h-8 w-8 animate-spin mx-auto mb-3 text-gray-400" />
+                <p className="text-gray-600">Loading templates...</p>
+              </div>
+            ) : selectedTemplate ? (
+              <div className="space-y-4">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setSelectedTemplate(null);
+                    setTemplateParams({});
+                    setAvailableColumns([]);
+                  }}
+                >
+                  ← Back to templates
+                </Button>
+                <div className="border-l-4 border-green-500 bg-green-50 p-4 rounded">
+                  <h3 className="font-semibold text-lg mb-1">{selectedTemplate.name}</h3>
+                  <p className="text-sm text-gray-700 mb-2">{selectedTemplate.description}</p>
+                  <div className="flex gap-2 mb-3">
+                    <Badge>{selectedTemplate.dimension}</Badge>
+                    <Badge variant={selectedTemplate.severity === 'critical' ? 'destructive' : 'secondary'}>
+                      {selectedTemplate.severity}
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-gray-600 bg-white p-2 rounded border">
+                    <strong>Best Practice:</strong> {selectedTemplate.bestPractices}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h4 className="font-medium">Configure Parameters</h4>
+                  {selectedTemplate.parameters.map((param) => (
+                    <div key={param.name}>
+                      <label className="block text-sm font-medium mb-1">
+                        {param.description}
+                        {param.required && <span className="text-red-500 ml-1">*</span>}
+                      </label>
+                      {param.type === 'table' ? (
+                        <select
+                          value={templateParams[param.name] || ''}
+                          onChange={(e) => {
+                            const tableName = e.target.value;
+                            setTemplateParams(prev => ({ ...prev, [param.name]: tableName }));
+                            // Load columns when table is selected
+                            if (tableName) {
+                              loadAvailableColumns(tableName);
+                            }
+                          }}
+                          className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                          disabled={loadingStates.loadingTables}
+                        >
+                          <option value="">
+                            {loadingStates.loadingTables ? 'Loading tables...' : 'Select a table...'}
+                          </option>
+                          {availableTables.map((table) => (
+                            <option key={table.fullName} value={table.fullName}>
+                              {table.fullName}
+                            </option>
+                          ))}
+                        </select>
+                      ) : param.type === 'column' ? (
+                        <select
+                          value={templateParams[param.name] || ''}
+                          onChange={(e) => setTemplateParams(prev => ({ ...prev, [param.name]: e.target.value }))}
+                          className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                          disabled={loadingStates.loadingColumns || availableColumns.length === 0}
+                        >
+                          <option value="">
+                            {loadingStates.loadingColumns
+                              ? 'Loading columns...'
+                              : availableColumns.length === 0
+                              ? 'Select a table first...'
+                              : 'Select a column...'}
+                          </option>
+                          {availableColumns.map((col) => (
+                            <option key={col.name} value={col.name}>
+                              {col.name} ({col.type})
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={templateParams[param.name] || param.defaultValue || ''}
+                          onChange={(e) => setTemplateParams(prev => ({ ...prev, [param.name]: e.target.value }))}
+                          placeholder={`Enter ${param.type}...`}
+                          className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {selectedTemplate.examples.length > 0 && (
+                  <div className="bg-gray-50 p-3 rounded border">
+                    <strong className="text-sm">Examples:</strong>
+                    <ul className="text-xs text-gray-600 mt-1 list-disc list-inside">
+                      {selectedTemplate.examples.map((ex, idx) => (
+                        <li key={idx}>{ex}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <Button
+                  onClick={applyTemplate}
+                  disabled={loadingStates.applyingTemplate}
+                  className="w-full bg-green-600 hover:bg-green-700"
+                >
+                  {loadingStates.applyingTemplate ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Creating Rule...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Create Rule from Template
+                    </>
+                  )}
+                </Button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-96 overflow-y-auto">
+                {templates.map((template) => (
+                  <div
+                    key={template.id}
+                    className="border rounded-lg p-4 hover:border-green-500 hover:shadow-md transition-all cursor-pointer"
+                    onClick={() => {
+                      setSelectedTemplate(template);
+                      // Initialize params with default values
+                      const initialParams: Record<string, any> = {};
+                      template.parameters.forEach(param => {
+                        if (param.defaultValue !== undefined) {
+                          initialParams[param.name] = param.defaultValue;
+                        }
+                      });
+                      setTemplateParams(initialParams);
+                      setAvailableColumns([]);
+                    }}
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <h4 className="font-medium text-sm">{template.name}</h4>
+                      <Badge variant={template.severity === 'critical' ? 'destructive' : 'secondary'} className="text-xs">
+                        {template.severity}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-gray-600 mb-2">{template.description}</p>
+                    <div className="flex items-center justify-between">
+                      <Badge className="text-xs">{template.dimension}</Badge>
+                      <span className="text-xs text-gray-500">{template.category}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Rules Filters */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center gap-4">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search rules..."
+                value={ruleFilter.search}
+                onChange={(e) => setRuleFilter(prev => ({ ...prev, search: e.target.value }))}
+                className="w-full pl-10 pr-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <select
+              value={ruleFilter.severity}
+              onChange={(e) => setRuleFilter(prev => ({ ...prev, severity: e.target.value }))}
+              className="px-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">All Severities</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+            <select
+              value={ruleFilter.status}
+              onChange={(e) => setRuleFilter(prev => ({ ...prev, status: e.target.value }))}
+              className="px-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">All Status</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </select>
+            {(ruleFilter.search || ruleFilter.severity || ruleFilter.status) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setRuleFilter({ search: '', severity: '', status: '' })}
+              >
+                Clear
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -954,14 +1518,21 @@ export const DataQuality: React.FC = () => {
             variant="outline"
             size="sm"
             onClick={() => {
-              if (selectedRules.size === rules.length) {
+              const filteredRules = rules.filter(rule => {
+                const matchesSearch = !ruleFilter.search || rule.name.toLowerCase().includes(ruleFilter.search.toLowerCase());
+                const matchesSeverity = !ruleFilter.severity || rule.severity === ruleFilter.severity;
+                const matchesStatus = !ruleFilter.status || (ruleFilter.status === 'enabled' ? rule.enabled : !rule.enabled);
+                return matchesSearch && matchesSeverity && matchesStatus;
+              });
+
+              if (selectedRules.size === filteredRules.length) {
                 setSelectedRules(new Set());
               } else {
-                setSelectedRules(new Set(rules.map(r => r.id)));
+                setSelectedRules(new Set(filteredRules.map(r => r.id)));
               }
             }}
           >
-            {selectedRules.size === rules.length ? (
+            {selectedRules.size > 0 ? (
               <CheckSquare className="mr-2 h-4 w-4" />
             ) : (
               <Square className="mr-2 h-4 w-4" />
@@ -1051,7 +1622,14 @@ export const DataQuality: React.FC = () => {
             </div>
           ) : (
             <div className="divide-y">
-              {rules.map((rule) => (
+              {rules
+                .filter(rule => {
+                  const matchesSearch = !ruleFilter.search || rule.name.toLowerCase().includes(ruleFilter.search.toLowerCase()) || (rule.description && rule.description.toLowerCase().includes(ruleFilter.search.toLowerCase()));
+                  const matchesSeverity = !ruleFilter.severity || rule.severity === ruleFilter.severity;
+                  const matchesStatus = !ruleFilter.status || (ruleFilter.status === 'enabled' ? rule.enabled : !rule.enabled);
+                  return matchesSearch && matchesSeverity && matchesStatus;
+                })
+                .map((rule) => (
                 <div
                   key={rule.id}
                   className="p-4 hover:bg-gray-50 transition-colors"
@@ -1492,6 +2070,31 @@ export const DataQuality: React.FC = () => {
 
   return (
     <div className="p-6 space-y-6">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-4 right-4 z-50 animate-in slide-in-from-top-5">
+          <Alert
+            variant={toastMessage.type === 'error' ? 'destructive' : 'default'}
+            className={`min-w-[300px] shadow-lg ${
+              toastMessage.type === 'success' ? 'bg-green-50 border-green-200' :
+              toastMessage.type === 'error' ? 'bg-red-50 border-red-200' :
+              'bg-blue-50 border-blue-200'
+            }`}
+          >
+            {toastMessage.type === 'success' && <CheckCircle2 className="h-4 w-4 text-green-600" />}
+            {toastMessage.type === 'error' && <XCircle className="h-4 w-4 text-red-600" />}
+            {toastMessage.type === 'info' && <Info className="h-4 w-4 text-blue-600" />}
+            <AlertDescription className={
+              toastMessage.type === 'success' ? 'text-green-900' :
+              toastMessage.type === 'error' ? 'text-red-900' :
+              'text-blue-900'
+            }>
+              {toastMessage.message}
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

@@ -182,7 +182,7 @@ export class AzureSqlConnector extends BaseConnector {
     await this.ensureConnected();
 
     const schemaQuery = `
-      SELECT 
+      SELECT
         t.TABLE_SCHEMA,
         t.TABLE_NAME,
         t.TABLE_TYPE,
@@ -204,20 +204,43 @@ export class AzureSqlConnector extends BaseConnector {
           ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
           AND tc.TABLE_SCHEMA = ku.TABLE_SCHEMA
         WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-      ) pk ON c.TABLE_SCHEMA = pk.TABLE_SCHEMA 
-         AND c.TABLE_NAME   = pk.TABLE_NAME 
+      ) pk ON c.TABLE_SCHEMA = pk.TABLE_SCHEMA
+         AND c.TABLE_NAME   = pk.TABLE_NAME
          AND c.COLUMN_NAME  = pk.COLUMN_NAME
       WHERE t.TABLE_TYPE IN ('BASE TABLE', 'VIEW')
       ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME, c.ORDINAL_POSITION
     `;
 
-    const res = await this.executeQuery(schemaQuery);
-    return this.buildSchemaInfo(res.rows as any[]);
+    // Query to fetch foreign key relationships
+    const fkQuery = `
+      SELECT
+        fk.name AS FK_NAME,
+        SCHEMA_NAME(fk.schema_id) AS FK_SCHEMA,
+        OBJECT_NAME(fk.parent_object_id) AS FK_TABLE,
+        COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS FK_COLUMN,
+        SCHEMA_NAME(pk_tab.schema_id) AS PK_SCHEMA,
+        OBJECT_NAME(fk.referenced_object_id) AS PK_TABLE,
+        COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS PK_COLUMN
+      FROM sys.foreign_keys fk
+      INNER JOIN sys.foreign_key_columns fkc
+        ON fk.object_id = fkc.constraint_object_id
+      INNER JOIN sys.tables pk_tab
+        ON fk.referenced_object_id = pk_tab.object_id
+      ORDER BY FK_SCHEMA, FK_TABLE, fk.name
+    `;
+
+    const [schemaRes, fkRes] = await Promise.all([
+      this.executeQuery(schemaQuery),
+      this.executeQuery(fkQuery)
+    ]);
+
+    return this.buildSchemaInfo(schemaRes.rows as any[], fkRes.rows as any[]);
   }
 
-  private buildSchemaInfo(rows: any[]): SchemaInfo {
+  private buildSchemaInfo(rows: any[], fkRows: any[] = []): SchemaInfo {
     const bySchema = new Map<string, { tables: Map<string, Table>; views: Map<string, View> }>();
 
+    // Build tables and columns
     for (const r of rows) {
       const sName = r.TABLE_SCHEMA as string;
       const tName = r.TABLE_NAME as string;
@@ -263,6 +286,43 @@ export class AzureSqlConnector extends BaseConnector {
           const tbl = tmap.get(tName)!;
           tbl.columns.push(col);
           if (col.isPrimaryKey) tbl.primaryKeys.push(col.name);
+        }
+      }
+    }
+
+    // Add foreign key relationships
+    for (const fk of fkRows) {
+      const schema = fk.FK_SCHEMA as string;
+      const table = fk.FK_TABLE as string;
+      const column = fk.FK_COLUMN as string;
+      const refSchema = fk.PK_SCHEMA as string;
+      const refTable = fk.PK_TABLE as string;
+      const refColumn = fk.PK_COLUMN as string;
+
+      if (bySchema.has(schema)) {
+        const bucket = bySchema.get(schema)!;
+        if (bucket.tables.has(table)) {
+          const tbl = bucket.tables.get(table)!;
+
+          // Add to foreignKeys array
+          tbl.foreignKeys.push({
+            name: fk.FK_NAME,
+            column: column,
+            referencedTable: refTable,
+            referencedColumn: refColumn,
+            referencedSchema: refSchema,
+          });
+
+          // Mark column as foreign key
+          const col = tbl.columns.find(c => c.name === column);
+          if (col) {
+            col.isForeignKey = true;
+            col.foreignKeyReference = {
+              table: refTable,
+              column: refColumn,
+              schema: refSchema,
+            };
+          }
         }
       }
     }

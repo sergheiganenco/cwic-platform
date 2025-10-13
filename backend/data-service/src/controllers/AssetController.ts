@@ -35,6 +35,8 @@ export interface Asset {
     | 'stream'
     | 'model';
   dataSourceId: string;
+  dataSourceName?: string;
+  dataSourceType?: string;
   schemaName?: string;
   tableName?: string;
   description?: string;

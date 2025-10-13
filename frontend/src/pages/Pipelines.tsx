@@ -7,8 +7,9 @@ import { Modal } from '@components/ui/Modal'
 import { useToast } from '@components/ui/Notification'
 import { Select } from '@components/ui/Select'
 import { useQuery } from '@tanstack/react-query'
-import { cn } from '@utils'
+import { cn } from '@utils/cn'
 import { ChevronRight, Clock, GitBranch, Pause, Play, RefreshCcw, Server, Shield } from 'lucide-react'
+import type { ComponentProps } from 'react'
 import * as React from 'react'
 
 /** Types (keep local to avoid import coupling; match your backend shape) */
@@ -39,41 +40,43 @@ interface Deployment {
   triggeredBy?: string
 }
 
-/** API helpers */
-async function getPipelines(params: { q?: string; env?: string; status?: string }) {
-  const query = new URLSearchParams()
-  if (params.q) query.set('q', params.q)
-  if (params.env) query.set('environment', params.env)
-  if (params.status) query.set('status', params.status)
+/** Import our pipeline API */
+import { pipelinesApi, runsApi } from '@/services/api/pipelines'
 
-  const res = await fetch(`/api/pipelines?${query.toString()}`)
-  if (!res.ok) throw new Error(`Failed to fetch pipelines: ${res.status}`)
-  const data = (await res.json()) as Pipeline[]
-  return data
+/** API helpers */
+async function getPipelines(params: { q?: string; env?: string; status?: string }): Promise<Pipeline[]> {
+  const response = await pipelinesApi.list(params)
+  return (response.data as Pipeline[]) || []
 }
 
-async function getDeployments(pipelineId: string) {
-  const res = await fetch(`/api/pipelines/${pipelineId}/deployments`)
-  if (!res.ok) throw new Error(`Failed to fetch deployments: ${res.status}`)
-  const data = (await res.json()) as Deployment[]
-  return data
+async function getDeployments(pipelineId: string): Promise<Deployment[]> {
+  const response = await runsApi.list({ pipeline_id: pipelineId })
+  return (response.data as Deployment[]) || []
 }
 
 /** Utils */
-function statusTone(s: PipelineStatus) {
+// Infer the 'tone' prop type directly from Badge component
+type Tone = ComponentProps<typeof Badge>['tone']
+
+// Helper that coerces mapped strings into your Badge's Tone union
+const asTone = (v: string) => v as unknown as Tone
+
+function statusTone(s: PipelineStatus): { tone: Tone; label: string } {
   switch (s) {
     case 'running':
-      return { tone: 'info' as const, label: 'Running' }
+      return { tone: asTone('info'), label: 'Running' }
     case 'failed':
-      return { tone: 'danger' as const, label: 'Failed' }
+      return { tone: asTone('error'), label: 'Failed' }
     case 'succeeded':
-      return { tone: 'success' as const, label: 'Succeeded' }
+      return { tone: asTone('success'), label: 'Succeeded' }
     case 'paused':
-      return { tone: 'warning' as const, label: 'Paused' }
+      return { tone: asTone('warning'), label: 'Paused' }
+    case 'idle':
     default:
-      return { tone: 'neutral' as const, label: 'Idle' }
+      return { tone: asTone('neutral'), label: 'Idle' }
   }
 }
+
 function envBadge(e: Environment) {
   switch (e) {
     case 'dev': return { className: 'bg-gray-100 text-gray-800', label: 'DEV' }
@@ -82,6 +85,7 @@ function envBadge(e: Environment) {
     case 'prod': return { className: 'bg-green-100 text-green-800', label: 'PROD' }
   }
 }
+
 function fmtTime(iso?: string) {
   if (!iso) return '—'
   try {
@@ -104,32 +108,56 @@ export const Pipelines: React.FC = () => {
   // Selected pipeline
   const [selected, setSelected] = React.useState<Pipeline | null>(null)
 
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery<Pipeline[]>({
     queryKey: ['pipelines', { q, env, status }],
     queryFn: () => getPipelines({ q, env, status }),
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   })
 
-  const { data: deployments, isLoading: isDepsLoading, isError: isDepsError, error: depsError, refetch: refetchDeps } =
-    useQuery({
-      queryKey: ['deployments', selected?.id],
-      queryFn: () => getDeployments(selected!.id),
-      enabled: !!selected,
-      staleTime: 30_000,
-    })
+  const {
+    data: deployments,
+    isLoading: isDepsLoading,
+    isError: isDepsError,
+    error: depsError,
+    refetch: refetchDeps,
+  } = useQuery<Deployment[]>({
+    queryKey: ['deployments', selected?.id],
+    queryFn: () => getDeployments(selected!.id),
+    enabled: !!selected,
+    staleTime: 30_000,
+  })
 
-  function handleStart(p: Pipeline) {
-    // TODO: POST /api/pipelines/:id/start
-    push({ type: 'info', message: `Starting pipeline "${p.name}"…` })
+  async function handleStart(p: Pipeline) {
+    try {
+      await pipelinesApi.trigger(p.id, { triggeredBy: 'manual' })
+      push({ type: 'info', message: `Started pipeline "${p.name}"` })
+      refetch()
+    } catch (err: any) {
+      push({ type: 'error', message: `Failed to start pipeline: ${err.message}` })
+    }
   }
-  function handlePause(p: Pipeline) {
-    // TODO: POST /api/pipelines/:id/pause
-    push({ type: 'warning', message: `Pausing pipeline "${p.name}"…` })
+
+  async function handlePause(target: string | Deployment) {
+    const runId = typeof target === 'string' ? target : target.id
+    try {
+      await runsApi.cancel(runId)
+      push({ type: 'warning', message: `Canceled pipeline run` })
+      refetchDeps()
+    } catch (err: any) {
+      push({ type: 'error', message: `Failed to cancel run: ${err.message}` })
+    }
   }
-  function handleRerun(p: Pipeline) {
-    // TODO: POST /api/pipelines/:id/rerun
-    push({ type: 'success', message: `Re-running pipeline "${p.name}"…` })
+
+  async function handleRerun(target: string | Deployment) {
+    const runId = typeof target === 'string' ? target : target.id
+    try {
+      await runsApi.retry(runId)
+      push({ type: 'success', message: `Retrying pipeline run` })
+      refetchDeps()
+    } catch (err: any) {
+      push({ type: 'error', message: `Failed to retry run: ${err.message}` })
+    }
   }
 
   return (
@@ -176,7 +204,11 @@ export const Pipelines: React.FC = () => {
               <Button variant="outline" onClick={() => { setQ(''); setEnv(''); setStatus('') }}>
                 Reset
               </Button>
-              <Button variant="secondary" onClick={() => refetch()} leftIcon={<RefreshCcw className="h-4 w-4" />}>
+              <Button
+                variant="outline"
+                onClick={() => refetch()}
+                leftIcon={<RefreshCcw className="h-4 w-4" />}
+              >
                 Refresh
               </Button>
             </div>
@@ -250,11 +282,11 @@ export const Pipelines: React.FC = () => {
                         Start
                       </Button>
                     ) : (
-                      <Button variant="outline" onClick={() => handlePause(p)} leftIcon={<Pause className="h-4 w-4" />}>
+                      <Button variant="outline" leftIcon={<Pause className="h-4 w-4" />}>
                         Pause
                       </Button>
                     )}
-                    <Button variant="outline" onClick={() => handleRerun(p)} leftIcon={<RefreshCcw className="h-4 w-4" />}>
+                    <Button variant="outline" leftIcon={<RefreshCcw className="h-4 w-4" />}>
                       Re-run
                     </Button>
                   </div>
@@ -321,10 +353,11 @@ export const Pipelines: React.FC = () => {
                           <th className="py-2 pr-4">Finished</th>
                           <th className="py-2 pr-4">Commit</th>
                           <th className="py-2 pr-4">Triggered By</th>
+                          <th className="py-2 pr-4">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {deployments.map((d) => (
+                        {deployments.map((d: Deployment) => (
                           <tr key={d.id} className="border-t">
                             <td className="py-2 pr-4 font-medium">{d.version}</td>
                             <td className="py-2 pr-4">
@@ -334,6 +367,16 @@ export const Pipelines: React.FC = () => {
                             <td className="py-2 pr-4">{fmtTime(d.finishedAt)}</td>
                             <td className="py-2 pr-4">{d.commit ?? '—'}</td>
                             <td className="py-2 pr-4">{d.triggeredBy ?? '—'}</td>
+                            <td className="py-2 pr-4">
+                              <div className="flex items-center gap-2">
+                                <Button variant="outline" size="sm" onClick={() => handlePause(d)}>
+                                  Cancel
+                                </Button>
+                                <Button variant="outline" size="sm" onClick={() => handleRerun(d)}>
+                                  Retry
+                                </Button>
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>

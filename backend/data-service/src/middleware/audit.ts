@@ -2,6 +2,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { logger } from '../utils/logger';
+import { maskSecrets } from '../utils/secrets';
 
 interface AuditLogEntry {
   entity_type: string;
@@ -89,7 +90,10 @@ export const auditMiddleware = (entityType: string, action: string) => {
       const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
       const userAgent = req.get('User-Agent') || 'unknown';
 
-      // Log the action
+      const shouldCaptureBody = req.method === 'POST' || req.method === 'PUT';
+      const sanitizedChanges = shouldCaptureBody ? maskSecrets(req.body) : undefined;
+      const sanitizedQuery = maskSecrets(req.query);
+
       auditService.logAction({
         entity_type: entityType,
         entity_id: entityId,
@@ -97,13 +101,13 @@ export const auditMiddleware = (entityType: string, action: string) => {
         actor: user?.id || user?.email || 'anonymous',
         actor_ip: clientIp,
         user_agent: userAgent,
-        changes: req.method === 'POST' || req.method === 'PUT' ? req.body : undefined,
+        changes: sanitizedChanges,
         metadata: {
           method: req.method,
           path: req.path,
-          query: req.query,
+          query: sanitizedQuery,
           statusCode: res.statusCode,
-          contentLength: body ? Buffer.byteLength(body) : 0
+          contentLength: typeof body === 'string' ? Buffer.byteLength(body) : Buffer.isBuffer(body) ? body.length : 0
         }
       }).catch(error => {
         logger.error('Audit logging failed', { error: error.message });

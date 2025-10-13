@@ -19,3 +19,10 @@ app.get('/health', (_req, res) => {
 app.get('/', (_req, res) => {
   res.json({ service: process.env.SERVICE_NAME || 'pipeline-service', message: 'Service up and running' });
 });
+
+// Import and register API routes
+import pipelineRoutes from './routes/pipelines.js';
+import runRoutes from './routes/runs.js';
+
+app.use('/api/pipelines', pipelineRoutes);
+app.use('/api/pipeline-runs', runRoutes);

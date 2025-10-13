@@ -5,6 +5,7 @@ export function Sidebar(){ return (
     <nav className="space-y-2">
       <a className="block hover:bg-slate-800 rounded px-3 py-2" href="/">Dashboard</a>
       <a className="block hover:bg-slate-800 rounded px-3 py-2" href="/ai">AI Assistant</a>
+      <a className="block hover:bg-slate-800 rounded px-3 py-2" href="/data-catalog">Data Catalog</a>
       <a className="block hover:bg-slate-800 rounded px-3 py-2" href="/pipelines">Pipelines</a>
     </nav>
   </aside>

@@ -1,4 +1,4 @@
-// src/hooks/useDataAssets.ts
+// frontend/src/hooks/useDataAssets.ts
 import { useApi } from '@/hooks/useApi';
 import type {
   AccessRequestResponse,
@@ -7,8 +7,8 @@ import type {
   AssetSummary,
   PaginationInfo
 } from '@/types/dataAssets';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { debounce } from '@/utils/performanceUtils';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 // ---------- API response types ----------
 interface AssetsApiResponse {
@@ -61,6 +61,8 @@ const mockAssets: Asset[] = [
     type: 'table',
     description: 'User profile information',
     dataSourceId: 'ds-1',
+    dataSourceName: 'Azure Feya',
+    dataSourceType: 'mssql',
     schema: 'public',
     table: 'user_profiles',
     owner: 'john.doe@company.com',
@@ -82,6 +84,8 @@ const mockAssets: Asset[] = [
     type: 'table',
     description: 'Daily sales transaction records',
     dataSourceId: 'ds-2',
+    dataSourceName: 'postgres',
+    dataSourceType: 'postgresql',
     schema: 'sales',
     table: 'transactions',
     owner: 'jane.smith@company.com',
@@ -116,6 +120,10 @@ const mockSummary: AssetSummary = {
   recentlyUpdated: 89
 };
 
+const mockFlag = String((import.meta as any)?.env?.VITE_USE_MOCKS ?? '').toLowerCase();
+const USE_MOCKS = mockFlag === '1' || mockFlag === 'true' || mockFlag === 'yes';
+// Only use mocks if explicitly enabled via VITE_USE_MOCKS env var
+
 // ---------- Helpers ----------
 function normalizeAccessResponse(raw: any): AccessRequestResponse {
   const status: AccessRequestResponse['status'] =
@@ -124,7 +132,6 @@ function normalizeAccessResponse(raw: any): AccessRequestResponse {
   return {
     requestId: String(raw?.requestId ?? raw?.id ?? raw?.request_id ?? ''),
     status,
-    // ensure required field exists even if backend doesn't send one
     message:
       typeof raw?.message === 'string' && raw.message.trim()
         ? raw.message
@@ -140,6 +147,7 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
   const api = useApi();
   const {
     autoFetch = true,
+    // include typical defaults + schema support (type allows it)
     defaultFilters = { page: 1, limit: 20, sortBy: 'updatedAt', sortOrder: 'desc' },
     refreshInterval = 0,
     revalidateOnFocus = false,
@@ -169,7 +177,7 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
   const lastRequestRef = useRef<string>('');
   const offlineTimerRef = useRef<number | null>(null); // debounce noisy offline flips
   const lastFetchTime = useRef<number>(0);
-  const MIN_FETCH_INTERVAL = 5000; // Minimum 5 seconds between fetches
+  const MIN_FETCH_INTERVAL = 500; // faster (0.5s) for a snappy UI
 
   // ---------- QS builder ----------
   const createQueryString = useCallback((current: AssetFilters): string => {
@@ -199,16 +207,13 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
   // ---------- Core fetch ----------
   const fetchAssets = useCallback(
     async (showLoading = true, force = false) => {
-      // Prevent too frequent refreshes unless forced
       const now = Date.now();
       if (!force && now - lastFetchTime.current < MIN_FETCH_INTERVAL) {
         return;
       }
       lastFetchTime.current = now;
 
-      // Cancel any in-flight request
       if (abortControllerRef.current) abortControllerRef.current.abort();
-
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
@@ -219,39 +224,41 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
       setIsValidating(true);
       setError(null);
 
-      // reflect browser offline immediately
       if (typeof navigator !== 'undefined' && 'onLine' in navigator) {
         markOffline(!navigator.onLine);
       }
 
       try {
         const queryString = createQueryString(filters);
-        const path = `/api/assets${queryString ? `?${queryString}` : ''}`;
+        const path = `/api/catalog/assets${queryString ? `?${queryString}` : ''}`;
 
-        // DEV: mock with slight delay
-        if (import.meta.env.MODE === 'development' && import.meta.env.VITE_USE_MOCKS !== '0') {
-          await new Promise((r) => setTimeout(r, 800));
+        if (USE_MOCKS) {
+          await new Promise((r) => setTimeout(r, 400));
           if (lastRequestRef.current !== reqId) return;
 
+          // very light client-side mock filtering just for UI
           let filtered = mockAssets.slice();
+
+          if (filters.dataSourceId) {
+            filtered = filtered.filter((a) => a.dataSourceId === filters.dataSourceId);
+          }
+          if (filters.schema) {
+            filtered = filtered.filter((a) => a.schema === filters.schema);
+          }
           if (filters.search) {
-            const s = filters.search.toLowerCase();
-            filtered = filtered.filter(
-              (a) =>
-                a.name.toLowerCase().includes(s) ||
-                (a.description?.toLowerCase() ?? '').includes(s) ||
-                a.tags.some((t) => t.toLowerCase().includes(s))
+            const s = (filters.search ?? '').toLowerCase();
+            filtered = filtered.filter((a) =>
+              a.name.toLowerCase().includes(s) ||
+              (a.description?.toLowerCase() ?? '').includes(s) ||
+              (a.schema ?? '').toLowerCase().includes(s)
             );
           }
 
-          // Sorting (basic)
           const sortBy = filters.sortBy ?? 'updatedAt';
           const sortOrder = (filters.sortOrder ?? 'desc') === 'desc' ? -1 : 1;
           filtered.sort((a: any, b: any) =>
             a[sortBy] > b[sortBy] ? sortOrder : a[sortBy] < b[sortBy] ? -sortOrder : 0
           );
-
-          // Paging
           const page = filters.page ?? 1;
           const limit = filters.limit ?? 20;
           const start = (page - 1) * limit;
@@ -272,46 +279,54 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
           return;
         }
 
-        // PROD: real API through unified client (handles retries/backoff)
-        const data = await api.get<AssetsApiResponse>(path, { signal: controller.signal });
+        // PROD call
+        const response = await api.get<{ success: boolean; data: AssetsApiResponse }>(path, {
+          signal: controller.signal
+        });
 
-        if (lastRequestRef.current !== reqId) return; // ignore stale
+        if (lastRequestRef.current !== reqId) return;
 
-        setAssets(Array.isArray(data.assets) ? data.assets : []);
+        // some api clients wrap payload under .data, some don't — normalize:
+        const payload = (response as any).data?.data ?? (response as any).data ?? response;
+
+        const arr = Array.isArray(payload.assets) ? payload.assets : [];
+        const pg = payload.pagination as PaginationInfo | undefined;
+        const total = payload.total ?? pg?.total ?? arr.length;
+
+        setAssets(arr);
         setPagination(
-          data.pagination ?? {
+          pg ?? {
             page: filters.page ?? 1,
             limit: filters.limit ?? 20,
-            total: data.total ?? (data.assets?.length ?? 0),
-            totalPages: Math.ceil((data.total ?? data.assets.length) / (filters.limit ?? 20)),
-            hasNext: Boolean(
-              (filters.page ?? 1) * (filters.limit ?? 20) < (data.total ?? data.assets.length)
-            ),
+            total,
+            totalPages: Math.ceil(total / (filters.limit ?? 20)),
+            hasNext: Boolean((filters.page ?? 1) * (filters.limit ?? 20) < total),
             hasPrev: (filters.page ?? 1) > 1
           }
         );
-        setSummary(data.summary ?? null);
+        setSummary(payload.summary ?? null);
         setRetryCount(0);
         markOffline(false);
       } catch (err: any) {
         if (lastRequestRef.current !== reqId) return;
         if (err?.name === 'AbortError') return;
 
-        const msg = err?.message || 'Failed to fetch assets';
+        const msg: string =
+          err?.response?.data?.message ||
+          (err?.message as string) ||
+          'Failed to fetch assets';
         setError(msg);
 
-        // Heuristic: treat network-ish errors (or browser offline) as offline
         const looksNetworky =
-          /NetworkError|Failed to fetch|TypeError: Failed to fetch|ECONNREFUSED|ERR_NETWORK/i.test(String(err)) ||
+          /NetworkError|Failed to fetch|ECONNREFUSED|ERR_NETWORK/i.test(String(err)) ||
           (typeof navigator !== 'undefined' && 'onLine' in navigator && !navigator.onLine);
         if (looksNetworky) markOffline(true);
 
-        if (!/Rate limit/i.test(msg) && retryCount < errorRetryCount) {
-          const delay = Math.min(1000 * Math.pow(2, retryCount), 30_000);
+        if (!/Rate limit/i.test(msg) && retryCount < (options.errorRetryCount ?? 3)) {
+          const delay = Math.min(800 * Math.pow(2, retryCount), 10_000);
           setTimeout(() => {
             if (lastRequestRef.current === reqId) {
               setRetryCount((n) => n + 1);
-              // Do not show global spinner on retries
               fetchAssets(false);
             }
           }, delay);
@@ -323,12 +338,30 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
         }
       }
     },
-    [api, filters, retryCount, errorRetryCount, createQueryString, markOffline]
+    [api, filters, retryCount, options.errorRetryCount, createQueryString, markOffline]
   );
 
   // ---------- Filters ----------
   const updateFilters = useCallback((newFilters: Partial<AssetFilters>) => {
-    setFilters((prev) => ({ ...prev, ...newFilters }));
+    setFilters((prev) => {
+      const merged = { ...prev, ...newFilters };
+
+      // If page wasn't provided, reset to 1 whenever a non-page filter changed
+      const nonPagingKeys: (keyof AssetFilters)[] = [
+        'search',
+        'type',
+        'objectType',
+        'dataSourceId',
+        'schema',
+        'sortBy',
+        'sortOrder'
+      ];
+      const changedNonPaging = nonPagingKeys.some((k) => (newFilters as any)[k] !== undefined);
+      if (changedNonPaging && newFilters.page === undefined) {
+        (merged as any).page = 1;
+      }
+      return merged;
+    });
     setError(null);
     setRetryCount(0);
   }, []);
@@ -351,8 +384,7 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
       reason?: string,
       options: { urgency?: 'low' | 'medium' | 'high' } = {}
     ): Promise<AccessRequestResponse> => {
-      // DEV mocks
-      if (import.meta.env.MODE === 'development' && import.meta.env.VITE_USE_MOCKS !== '0') {
+      if (USE_MOCKS) {
         await new Promise((r) => setTimeout(r, 250));
         return normalizeAccessResponse({
           requestId: `mock-${assetId}-${Date.now()}`,
@@ -361,7 +393,6 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
         });
       }
 
-      // Real call via unified client
       const raw = await api.post<any>('/api/access-requests', {
         assetId,
         reason,
@@ -375,13 +406,12 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
   );
 
   const mutate = useCallback(() => {
-    // re-fetch without global spinner
     fetchAssets(false);
   }, [fetchAssets]);
 
-  // Debounced version for filter changes
+  // Debounced fetch when filters change
   const debouncedFetch = useMemo(
-    () => debounce(() => fetchAssets(true, false), 500),
+    () => debounce(() => fetchAssets(true, false), 300),
     [fetchAssets]
   );
 
@@ -389,18 +419,16 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
   // Initial fetch on mount
   useEffect(() => {
     if (!autoFetch) return;
-
-    const delay = import.meta.env.MODE === 'development' ? 200 : 100;
-    const t = setTimeout(() => fetchAssets(true, false), delay);
+    const t = setTimeout(() => fetchAssets(true, false), 0);
     return () => clearTimeout(t);
-  }, []); // Only on mount
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch when filters change (debounced)
+  // Fetch when filters change (debounced) — skip first render until initial fetch executed
   useEffect(() => {
-    if (!autoFetch || lastFetchTime.current === 0) return; // Skip on initial mount
-
+    if (!autoFetch || lastFetchTime.current === 0) return;
     debouncedFetch();
-  }, [filters, autoFetch, debouncedFetch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters, autoFetch]);
 
   useEffect(() => {
     if (refreshInterval > 0 && import.meta.env.MODE !== 'development') {

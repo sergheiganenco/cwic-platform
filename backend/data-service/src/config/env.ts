@@ -1,4 +1,4 @@
-// backend/data-service/src/config/env.ts
+﻿// backend/data-service/src/config/env.ts
 import dotenv from 'dotenv';
 import path from 'path';
 import { URL } from 'url';
@@ -29,6 +29,7 @@ export interface Config {
   security: {
     jwtSecret: string;
     jwtExpiresIn: string;
+    connectionEncryptionKey: string;
     helmet: {
       contentSecurityPolicy: boolean;
       crossOriginEmbedderPolicy: boolean;
@@ -128,6 +129,7 @@ export const config: Config = {
   security: {
     jwtSecret: process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production',
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    connectionEncryptionKey: process.env.CONNECTION_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || 'dev-connection-secret-key-please-change',
     helmet: {
       contentSecurityPolicy: process.env.NODE_ENV === 'production',
       crossOriginEmbedderPolicy: false,
@@ -153,6 +155,7 @@ export const env = {
   SERVICE_NAME: config.server.serviceName,
   JWT_SECRET: config.security.jwtSecret,
   JWT_EXPIRES_IN: config.security.jwtExpiresIn,
+  CONNECTION_ENCRYPTION_KEY: config.security.connectionEncryptionKey,
   DATABASE_URL: config.database.url,
   LOG_LEVEL: config.logging.level,
   CORS_ORIGIN: Array.isArray(config.server.corsOrigin)
@@ -179,6 +182,13 @@ export const validateConfig = (): void => {
   // JWT secret length in prod
   if (isProduction && config.security.jwtSecret.length < 32) {
     throw new Error('JWT secret must be at least 32 characters long in production');
+  }
+
+  if (!config.security.connectionEncryptionKey) {
+    throw new Error('CONNECTION_ENCRYPTION_KEY environment variable is required');
+  }
+  if (isProduction && config.security.connectionEncryptionKey.length < 32) {
+    throw new Error('CONNECTION_ENCRYPTION_KEY must be at least 32 characters long in production');
   }
 
   // Pool sizes
@@ -214,7 +224,7 @@ export const logConfig = (): void => {
     }`
   );
   console.log(`   Database: ${config.database.host}:${config.database.port}/${config.database.name}`);
-  console.log(`   Database User: ${config.database.user}`);
+  console.log(`   Database User: [REDACTED]`); // Never log credentials
   console.log(`   SSL: ${config.database.ssl ? 'enabled' : 'disabled'}`);
   console.log(`   Pool Max: ${config.database.poolMax}`);
   console.log(`   Pool Min: ${config.database.poolMin}`);
@@ -222,3 +232,7 @@ export const logConfig = (): void => {
   console.log(`   Log Level: ${config.logging.level}`);
   console.log('');
 };
+
+
+
+

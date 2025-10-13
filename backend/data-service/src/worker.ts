@@ -2,6 +2,7 @@ import { Worker } from 'bullmq';
 import 'dotenv/config';
 import mssql from 'mssql';
 import { Client as PgClient, Pool } from 'pg';
+import { decryptConfig, isEncryptedConfig } from './utils/secrets';
 
 const cpdb = new Pool({ connectionString: process.env.DATABASE_URL });
 const connection = { connection: { url: process.env.REDIS_URL || 'redis://redis:6379' } };
@@ -50,6 +51,19 @@ new Worker('catalog:profile', async job => {
   if (!asset) throw new Error('Asset not found');
 
   const { type, cfg, schema_name, table_name } = asset;
+  let connection = cfg;
+  if (typeof connection === 'string') {
+    try {
+      connection = JSON.parse(connection);
+    } catch {
+      connection = {};
+    }
+  }
+  if (isEncryptedConfig(connection)) {
+    connection = decryptConfig(connection);
+  }
+  const safeCfg: any = connection || {};
+
   let columns: Array<{ name: string, data_type: string }> = [];
   let rowsCount = 0;
 
@@ -59,9 +73,9 @@ new Worker('catalog:profile', async job => {
   try {
     if (type === 'postgresql') {
       const cli = new PgClient({
-        host: cfg.host, port: Number(cfg.port ?? 5432),
-        database: cfg.database, user: cfg.username, password: cfg.password,
-        ssl: cfg.ssl === false || cfg.ssl?.mode === 'disable' ? undefined : cfg.ssl
+        host: safeCfg.host, port: Number(safeCfg.port ?? 5432),
+        database: safeCfg.database, user: safeCfg.username, password: safeCfg.password,
+        ssl: safeCfg.ssl === false || safeCfg.ssl?.mode === 'disable' ? undefined : safeCfg.ssl
       });
       await cli.connect();
 
@@ -72,13 +86,19 @@ new Worker('catalog:profile', async job => {
         ORDER BY ordinal_position`, [schema_name, table_name]);
       columns = cols.rows;
 
-      const rc = await cli.query(`SELECT reltuples::bigint AS row_est FROM pg_class WHERE oid = $1::regclass`, [`"${schema_name}"."${table_name}"`]);
+      // Use parameterized query to prevent SQL injection
+      const escapedIdentifier = `"${schema_name.replace(/"/g, '""')}"."${table_name.replace(/"/g, '""')}"`;
+      const rc = await cli.query(`SELECT reltuples::bigint AS row_est FROM pg_class WHERE oid = $1::regclass`, [escapedIdentifier]);
       rowsCount = Number(rc.rows?.[0]?.row_est || 0);
 
       for (const col of columns) {
         // sample 1% or up to 10k rows
+        // Use parameterized identifiers to prevent SQL injection
+        const escapedColumn = col.name.replace(/"/g, '""');
+        const escapedSchema = schema_name.replace(/"/g, '""');
+        const escapedTable = table_name.replace(/"/g, '""');
         const sample = await cli.query(`
-          SELECT ${JSON.stringify(col.name).replace(/"/g,'')} as name FROM "${schema_name}"."${table_name}"
+          SELECT "${escapedColumn}" FROM "${escapedSchema}"."${escapedTable}"
           TABLESAMPLE SYSTEM (1) LIMIT 10000
         `).catch(() => ({ rows: [] as any[] }));
 
@@ -123,12 +143,12 @@ new Worker('catalog:profile', async job => {
       await cli.end();
     } else if (type === 'mssql') {
       const pool = await mssql.connect({
-        server: cfg.host,
-        port: Number(cfg.port ?? 1433),
-        database: cfg.database,
-        user: cfg.username,
-        password: cfg.password,
-        options: { encrypt: true, trustServerCertificate: true, ...(cfg.options || {}) }
+        server: safeCfg.host,
+        port: Number(safeCfg.port ?? 1433),
+        database: safeCfg.database,
+        user: safeCfg.username,
+        password: safeCfg.password,
+        options: { encrypt: true, trustServerCertificate: true, ...(safeCfg.options || {}) }
       });
 
       const cols = await pool.request().query(`

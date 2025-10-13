@@ -147,6 +147,8 @@ export class AssetService {
         name: row.name,
         type: row.type,
         dataSourceId: row.data_source_id,
+        dataSourceName: row.data_source_name,
+        dataSourceType: row.data_source_type,
         schemaName: row.schema_name,
         tableName: row.table_name,
         description: row.description,
@@ -198,6 +200,8 @@ export class AssetService {
         name: row.name,
         type: row.type,
         dataSourceId: row.data_source_id,
+        dataSourceName: row.data_source_name,
+        dataSourceType: row.data_source_type,
         schemaName: row.schema_name,
         tableName: row.table_name,
         description: row.description,
@@ -232,13 +236,13 @@ export class AssetService {
         metadata = {}
       } = assetData;
 
-      const query = `
+      const insertQuery = `
         INSERT INTO assets (
           name, type, data_source_id, schema_name, table_name,
           description, columns, tags, status, metadata
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING *
+        RETURNING id
       `;
 
       const values = [
@@ -254,7 +258,21 @@ export class AssetService {
         JSON.stringify(metadata)
       ];
 
-      const result = await this.db.query(query, values);
+      const insertResult = await this.db.query(insertQuery, values);
+      const newAssetId = insertResult.rows[0].id;
+
+      // Fetch the complete asset with data source info
+      const selectQuery = `
+        SELECT
+          a.*,
+          ds.name as data_source_name,
+          ds.type as data_source_type
+        FROM assets a
+        LEFT JOIN data_sources ds ON a.data_source_id = ds.id
+        WHERE a.id = $1
+      `;
+
+      const result = await this.db.query(selectQuery, [newAssetId]);
       return this.mapRowToAsset(result.rows[0]);
     } catch (error) {
       logger.error('Error in createAsset:', error);
@@ -463,19 +481,31 @@ export class AssetService {
       setClause.push(`updated_at = NOW()`);
       params.push(id);
 
-      const query = `
+      const updateQuery = `
         UPDATE assets
         SET ${setClause.join(', ')}
         WHERE id = $${paramIndex}
-        RETURNING *
+        RETURNING id
       `;
 
-      const result = await this.db.query(query, params);
+      const updateResult = await this.db.query(updateQuery, params);
 
-      if (result.rows.length === 0) {
+      if (updateResult.rows.length === 0) {
         return null;
       }
 
+      // Fetch the complete asset with data source info
+      const selectQuery = `
+        SELECT
+          a.*,
+          ds.name as data_source_name,
+          ds.type as data_source_type
+        FROM assets a
+        LEFT JOIN data_sources ds ON a.data_source_id = ds.id
+        WHERE a.id = $1
+      `;
+
+      const result = await this.db.query(selectQuery, [id]);
       return this.mapRowToAsset(result.rows[0]);
     } catch (error) {
       logger.error('Error in updateAsset:', error);
@@ -488,20 +518,32 @@ export class AssetService {
    */
   public async addTags(id: string, tags: string[]): Promise<Asset | null> {
     try {
-      const query = `
+      const updateQuery = `
         UPDATE assets
         SET tags = COALESCE(tags, '{}') || $1::text[],
             updated_at = NOW()
         WHERE id = $2
-        RETURNING *
+        RETURNING id
       `;
 
-      const result = await this.db.query(query, [tags, id]);
+      const updateResult = await this.db.query(updateQuery, [tags, id]);
 
-      if (result.rows.length === 0) {
+      if (updateResult.rows.length === 0) {
         return null;
       }
 
+      // Fetch the complete asset with data source info
+      const selectQuery = `
+        SELECT
+          a.*,
+          ds.name as data_source_name,
+          ds.type as data_source_type
+        FROM assets a
+        LEFT JOIN data_sources ds ON a.data_source_id = ds.id
+        WHERE a.id = $1
+      `;
+
+      const result = await this.db.query(selectQuery, [id]);
       return this.mapRowToAsset(result.rows[0]);
     } catch (error) {
       logger.error('Error in addTags:', error);
@@ -514,20 +556,32 @@ export class AssetService {
    */
   public async removeTags(id: string, tags: string[]): Promise<Asset | null> {
     try {
-      const query = `
+      const updateQuery = `
         UPDATE assets
         SET tags = ARRAY(SELECT unnest(tags) EXCEPT SELECT unnest($1::text[])),
             updated_at = NOW()
         WHERE id = $2
-        RETURNING *
+        RETURNING id
       `;
 
-      const result = await this.db.query(query, [tags, id]);
+      const updateResult = await this.db.query(updateQuery, [tags, id]);
 
-      if (result.rows.length === 0) {
+      if (updateResult.rows.length === 0) {
         return null;
       }
 
+      // Fetch the complete asset with data source info
+      const selectQuery = `
+        SELECT
+          a.*,
+          ds.name as data_source_name,
+          ds.type as data_source_type
+        FROM assets a
+        LEFT JOIN data_sources ds ON a.data_source_id = ds.id
+        WHERE a.id = $1
+      `;
+
+      const result = await this.db.query(selectQuery, [id]);
       return this.mapRowToAsset(result.rows[0]);
     } catch (error) {
       logger.error('Error in removeTags:', error);
@@ -697,6 +751,8 @@ export class AssetService {
       name: row.name,
       type: row.type,
       dataSourceId: row.data_source_id,
+      dataSourceName: row.data_source_name,
+      dataSourceType: row.data_source_type,
       schemaName: row.schema_name,
       tableName: row.table_name,
       description: row.description,

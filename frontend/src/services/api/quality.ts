@@ -136,6 +136,25 @@ export interface QualityTrend {
   passRate: number;
 }
 
+export interface RuleTemplate {
+  id: string;
+  name: string;
+  description: string;
+  dimension: 'completeness' | 'accuracy' | 'consistency' | 'validity' | 'freshness' | 'uniqueness';
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  category: string;
+  sqlTemplate: string;
+  parameters: {
+    name: string;
+    description: string;
+    type: 'table' | 'column' | 'threshold' | 'pattern' | 'number' | 'string';
+    required: boolean;
+    defaultValue?: any;
+  }[];
+  examples: string[];
+  bestPractices: string;
+}
+
 class QualityAPI {
   private getAuthHeaders(): HeadersInit {
     const token = localStorage.getItem('token');
@@ -462,6 +481,57 @@ class QualityAPI {
       console.error('Generate rule error:', error);
       // Generate mock rule from prompt
       return this.generateMockRuleFromPrompt(prompt);
+    }
+  }
+
+  // ============================================================================
+  // TEMPLATE ENDPOINTS
+  // ============================================================================
+
+  async getRuleTemplates(filters?: {
+    dimension?: string;
+    category?: string;
+    search?: string;
+  }): Promise<RuleTemplate[]> {
+    try {
+      const params = new URLSearchParams();
+      if (filters?.dimension) params.append('dimension', filters.dimension);
+      if (filters?.category) params.append('category', filters.category);
+      if (filters?.search) params.append('search', filters.search);
+
+      const response = await fetch(`${API_BASE}/quality/rule-templates?${params.toString()}`, {
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get templates: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.data.templates || [];
+    } catch (error) {
+      console.error('Get templates error:', error);
+      return [];
+    }
+  }
+
+  async applyRuleTemplate(templateId: string, parameters: Record<string, any>): Promise<QualityRule> {
+    try {
+      const response = await fetch(`${API_BASE}/quality/rule-templates/${templateId}/apply`, {
+        method: 'POST',
+        headers: this.getAuthHeaders(),
+        body: JSON.stringify({ parameters }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to apply template: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.data.rule;
+    } catch (error) {
+      console.error('Apply template error:', error);
+      throw error;
     }
   }
 

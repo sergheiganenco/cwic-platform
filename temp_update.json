@@ -1,0 +1,10 @@
+{
+  "connectionConfig": {
+    "host": "feya-dbserver.database.windows.net",
+    "port": 1433,
+    "username": "feya_admin_sql",
+    "password": "@Polina2022!$@",
+    "database": "Feya_Db",
+    "ssl": true
+  }
+}

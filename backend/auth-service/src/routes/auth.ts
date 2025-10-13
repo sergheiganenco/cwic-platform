@@ -12,7 +12,7 @@ export const authRouter = Router();
 const RegisterSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
-  display_name: z.string().min(2).max(100)
+  display_name: z.string().min(2).max(100).regex(/^[a-zA-Z0-9\s\-_.]+$/, 'Display name contains invalid characters')
 });
 
 const LoginSchema = z.object({
@@ -39,6 +39,24 @@ authRouter.post('/register', async (req, res, next) => {
     const sid = randomUUID();
     const access = signAccess({ sub: user.id, roles: user.roles, sid });
     const refresh = signRefresh({ sub: user.id, sid });
+
+    // Set secure HTTP-only cookies
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie('access_token', access, {
+      httpOnly: true,
+      secure: isProd, // HTTPS only in production
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000, // 15 minutes
+      path: '/',
+    });
+    res.cookie('refresh_token', refresh, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: '/auth/refresh',
+    });
+
     res.status(201).json({ user, tokens: { access, refresh } });
   } catch (e) { next(e); }
 });
@@ -58,6 +76,24 @@ authRouter.post('/login', async (req, res, next) => {
     const sid = randomUUID();
     const access = signAccess({ sub: u.id, roles: u.roles, sid });
     const refresh = signRefresh({ sub: u.id, sid });
+
+    // Set secure HTTP-only cookies
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie('access_token', access, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000, // 15 minutes
+      path: '/',
+    });
+    res.cookie('refresh_token', refresh, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: '/auth/refresh',
+    });
+
     res.json({ user: { id: u.id, email: u.email, display_name: u.display_name, roles: u.roles }, tokens: { access, refresh } });
   } catch (e) { next(e); }
 });
@@ -86,6 +122,24 @@ authRouter.post('/refresh', async (req, res, next) => {
 
     const access = signAccess({ sub: decoded.sub, roles, sid: newSid });
     const newRefresh = signRefresh({ sub: decoded.sub, sid: newSid });
+
+    // Set secure HTTP-only cookies
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie('access_token', access, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000,
+      path: '/',
+    });
+    res.cookie('refresh_token', newRefresh, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/auth/refresh',
+    });
+
     res.json({ access, refresh: newRefresh });
   } catch (e) { next(e); }
 });
@@ -94,6 +148,10 @@ authRouter.post('/refresh', async (req, res, next) => {
 authRouter.post('/logout', async (req, res, _next) => {
   try {
     const { refresh } = (req.body || {}) as { refresh?: string };
+    // Clear cookies on logout
+    res.clearCookie('access_token', { path: '/' });
+    res.clearCookie('refresh_token', { path: '/auth/refresh' });
+
     if (refresh) {
       try {
         const decoded: any = verifyRefresh(refresh);

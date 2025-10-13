@@ -3,12 +3,19 @@ export interface Asset {
   id: string;
   name: string;
   type: 'table' | 'view' | 'file' | 'api' | 'dashboard' | 'report';
+  urn?: string;
   description?: string;
   dataSourceId: string;
+  dataSourceName?: string; // Name of the data source (server/database)
+  dataSourceType?: string; // Type of data source (postgresql, mysql, etc.)
   schema: string;
   table: string;
+  rowCount?: number | null; // Row count for tables/views
+  columnCount?: number | null; // Column count for tables/views
   owner: string;
   quality: 'high' | 'medium' | 'low';
+  qualityScore?: number; // Numeric quality score (0-100)
+  trustScore?: number; // Trust score (0-100) - calculated from various metrics
   classification: 'public' | 'internal' | 'confidential' | 'restricted';
   tags: string[];
   metadata: Record<string, any>;
@@ -18,7 +25,12 @@ export interface Asset {
   createdBy: string;
   updatedBy?: string;
   accessRequests?: number;
-  viewCount?: number;
+  viewCount?: number; // Usage: number of times viewed
+  ratingAvg?: number | null; // Average user rating (1-5)
+  bookmarkCount?: number; // Number of users who bookmarked
+  commentCount?: number; // Number of comments
+  ownerId?: string; // UUID of owner
+  lastProfiledAt?: string; // When data profiling last ran
   isBookmarked?: boolean;
   lineageDepth?: number;
 }
@@ -28,13 +40,15 @@ export interface AssetFilters {
   page?: number;
   limit?: number;
   search?: string;
-  type?: Asset['type'];
+  type?: Asset['type'] | string;
   owner?: string;
   quality?: Asset['quality'];
   classification?: Asset['classification'];
   dataSourceId?: string;
+  schema?: string;
   tags?: string[];
-  sortBy?: 'name' | 'updatedAt' | 'createdAt' | 'quality' | 'owner';
+  objectType?: 'user' | 'system';
+  sortBy?: 'name' | 'updatedAt' | 'createdAt' | 'quality' | 'owner' | 'rows' | string;
   sortOrder?: 'asc' | 'desc';
   dateRange?: {
     start: string;
@@ -52,7 +66,9 @@ export interface AssetFiltersFromUrl {
   quality?: string;
   classification?: string;
   dataSourceId?: string;
+  schema?: string;
   tags?: string[];
+  objectType?: string;
   sortBy?: string;
   sortOrder?: string;
   dateRange?: {

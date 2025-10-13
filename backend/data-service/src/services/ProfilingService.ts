@@ -102,7 +102,7 @@ export class ProfilingService {
       `SELECT column_name, data_type, is_nullable
        FROM catalog_columns
        WHERE asset_id = $1
-       ORDER BY ordinal_position`,
+       ORDER BY ordinal NULLS LAST, column_name`,
       [assetId]
     );
 
@@ -110,7 +110,7 @@ export class ProfilingService {
     logger.info(`Profiling ${columns.length} columns for ${schema_name}.${table_name}`);
 
     // Connect to actual data source and profile
-    const connector = ConnectorFactory.create({
+    const connector = ConnectorFactory.createConnector({
       type: dataSource.type,
       host: dataSource.host,
       port: dataSource.port,
@@ -124,7 +124,7 @@ export class ProfilingService {
     try {
       // Get row count
       const countQuery = `SELECT COUNT(*) as cnt FROM ${this.escapeIdentifier(schema_name)}.${this.escapeIdentifier(table_name)}`;
-      const countResult = await connector.query(countQuery);
+      const countResult = await connector.executeQuery(countQuery);
       rowCount = parseInt(countResult.rows[0]?.cnt || '0');
 
       // Profile each column
@@ -232,7 +232,7 @@ export class ProfilingService {
       FROM ${fullTableName}
     `;
 
-    const statsResult = await connector.query(statsQuery);
+    const statsResult = await connector.executeQuery(statsQuery);
     const stats = statsResult.rows[0];
 
     const nullCount = parseInt(stats.null_count || '0');
@@ -254,7 +254,7 @@ export class ProfilingService {
             STDDEV(${escapedColumn}) as stddev_val
           FROM ${fullTableName}
         `;
-        const numericResult = await connector.query(numericQuery);
+        const numericResult = await connector.executeQuery(numericQuery);
         const numStats = numericResult.rows[0];
 
         min = numStats.min_val;
@@ -278,7 +278,7 @@ export class ProfilingService {
 
     let topValues: Array<{ value: any; count: number; percentage: number }> = [];
     try {
-      const topResult = await connector.query(topValuesQuery);
+      const topResult = await connector.executeQuery(topValuesQuery);
       topValues = topResult.rows.map((row: any) => ({
         value: row.value,
         count: parseInt(row.count),
@@ -496,7 +496,12 @@ export class ProfilingService {
         profiles.push(profile);
         successCount++;
       } catch (error: any) {
-        logger.error(`Error profiling asset ${asset.id} (${asset.schema_name}.${asset.table_name}):`, error.message);
+        logger.error(`Error profiling asset ${asset.id} (${asset.schema_name}.${asset.table_name}):`, {
+          message: error.message,
+          code: error.code,
+          stack: error.stack?.split('\n')[0],
+          details: error.toString()
+        });
         errorCount++;
 
         // Continue profiling other assets even if one fails

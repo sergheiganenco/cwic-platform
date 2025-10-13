@@ -64,6 +64,11 @@ export interface Column {
   scale?: number;
   isPrimaryKey?: boolean;
   isForeignKey?: boolean;
+  foreignKeyReference?: {
+    table: string;
+    column: string;
+    schema?: string;
+  };
   isUnique?: boolean;
   comment?: string;
 }

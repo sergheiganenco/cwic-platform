@@ -17,6 +17,10 @@ RUN npm i -g tsx@4
 COPY tsconfig.json ./tsconfig.json
 COPY src ./src
 
+# Security: Run as non-root user
+RUN chown -R node:node /app
+USER node
+
 ENV NODE_ENV=development
 ENV HOST=0.0.0.0
 ENV PORT=8000

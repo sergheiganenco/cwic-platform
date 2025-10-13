@@ -1,6 +1,7 @@
 import { Badge } from '@components/ui/Badge'
 import { Card, CardContent } from '@components/ui/Card'
 import { cn } from '@utils'
+import { Database } from 'lucide-react'
 
 export type Asset = {
   id: string
@@ -11,6 +12,9 @@ export type Asset = {
   tags?: string[]
   updatedAt?: string
   qualityScore?: number
+  dataSourceName?: string
+  dataSourceType?: string
+  schema?: string
 }
 
 export interface AssetCardProps {
@@ -38,6 +42,15 @@ export function AssetCard({ asset, onClick, className }: AssetCardProps) {
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="truncate text-base font-semibold text-gray-900">{asset.name}</div>
+            {(asset.dataSourceName || asset.schema) && (
+              <div className="mt-1 flex items-center gap-1.5 text-xs text-gray-500">
+                <Database className="h-3 w-3" />
+                <span className="truncate">
+                  {asset.dataSourceName}
+                  {asset.schema && ` · ${asset.schema}`}
+                </span>
+              </div>
+            )}
             {asset.description && (
               <div className="mt-1 line-clamp-2 text-sm text-gray-600">{asset.description}</div>
             )}

@@ -1,9 +1,9 @@
 ﻿﻿// src/app.ts
 import compression from "compression";
-import cors from "cors";
-import "dotenv/config";
+import cors, { type CorsOptions } from "cors";
+import type { RequestHandler } from "express";
 import express, { type NextFunction, type Request, type Response } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit from "express-rate-limit"; // ← type import
 import helmet from "helmet";
 import morgan from "morgan";
 import { randomUUID } from "node:crypto";
@@ -13,6 +13,7 @@ import { normalizeDataSourceBody } from "./middleware/normalizeDataSourceBody.js
 import aiServiceProxy from "./proxy/aiServiceProxy.js";
 import authServiceProxy from "./proxy/authServiceProxy.js";
 import dataServiceProxy from "./proxy/dataServiceProxy.js";
+import pipelineServiceProxy from "./proxy/pipelineServiceProxy.js";
 
 const app = express();
 
@@ -21,6 +22,16 @@ const isProd = NODE_ENV === "production";
 const isDev = !isProd;
 const bodyLimit = process.env.BODY_LIMIT || "1mb";
 const DEV_BEARER = process.env.DEV_BEARER ?? "";
+
+function coerceTrustProxy(val: string | undefined, isProd: boolean) {
+  if (val == null) return isProd ? 1 : false; // prod: 1 hop; dev: do not trust proxy by default
+  const v = val.trim().toLowerCase();
+  if (v === "true") return true;           // boolean
+  if (v === "false") return false;         // boolean
+  const num = Number(val);
+  if (!Number.isNaN(num)) return num;      // numeric hop count
+  return val;                              // string mask: "loopback", "uniquelocal", "127.0.0.1/8", etc.
+}
 
 /** Parse comma-separated CORS origins from env */
 function parseOrigins(val?: string): string[] {
@@ -38,13 +49,42 @@ const allowAll = origins.length === 0 || origins.includes("*");
 
 // ────────────────────────── App hardening & basics ──────────────────────────
 app.disable("x-powered-by");
-app.set("trust proxy", process.env.TRUST_PROXY ?? (isProd ? "1" : "true"));
+app.set("trust proxy", coerceTrustProxy(process.env.TRUST_PROXY, isProd));
 
+
+// Security headers with proper CSP configuration
 app.use(
   helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false,
-    hsts: isProd ? undefined : false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"], // Allow inline scripts for React
+        styleSrc: ["'self'", "'unsafe-inline'"], // Allow inline styles
+        imgSrc: ["'self'", "data:", "https:"],
+        connectSrc: ["'self'", ...origins], // Allow API calls to configured origins
+        fontSrc: ["'self'", "data:"],
+        objectSrc: ["'none'"],
+        mediaSrc: ["'self'"],
+        frameSrc: ["'none'"],
+      },
+    },
+    crossOriginEmbedderPolicy: true,
+    crossOriginOpenerPolicy: { policy: "same-origin" },
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    dnsPrefetchControl: { allow: false },
+    frameguard: { action: "deny" },
+    hidePoweredBy: true,
+    hsts: {
+      maxAge: 31536000, // 1 year
+      includeSubDomains: true,
+      preload: true,
+    },
+    ieNoOpen: true,
+    noSniff: true,
+    originAgentCluster: true,
+    permittedCrossDomainPolicies: { permittedPolicies: "none" },
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    xssFilter: true,
   })
 );
 
@@ -77,7 +117,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // Standard CORS for non-OPTIONS requests
-const corsOptions: cors.CorsOptions = {
+const corsOptions: CorsOptions = {
   origin: allowAll ? true : origins,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -87,14 +127,22 @@ const corsOptions: cors.CorsOptions = {
 };
 app.use(cors(corsOptions));
 
-// ─────────────────────────── Rate limit (prod only) ─────────────────────────
-const limiter = rateLimit({
+// ─────────────────────────── Rate limit (always enabled with higher dev limits) ─────────────────────────
+const limiter: RequestHandler = rateLimit({
   windowMs: 60_000,
-  max: 300,
+  max: isProd ? 300 : 1000, // Lower limit in production
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === "OPTIONS" || !isProd,
-}) as unknown as express.RequestHandler;
+  skip: (req) => req.method === "OPTIONS", // Never skip rate limiting entirely
+  handler: (req, res) => {
+    console.warn(`Rate limit exceeded for IP: ${req.ip}`);
+    res.status(429).json({
+      success: false,
+      error: "Too many requests, please try again later."
+    });
+  },
+}) as unknown as RequestHandler;
+
 app.use(limiter);
 
 // ─────────────────────────── Parsers & logging ──────────────────────────────
@@ -160,17 +208,7 @@ if (isDev) {
   });
 }
 
-// In dev, if no Authorization header, attach DEV_BEARER (do not overwrite a real one)
-if (isDev) {
-  app.use(["/api", "/api/ai", "/api/auth"], (req, _res, next) => {
-    if (!req.headers.authorization && DEV_BEARER) {
-      req.headers.authorization = DEV_BEARER.startsWith("Bearer ")
-        ? DEV_BEARER
-        : `Bearer ${DEV_BEARER}`;
-    }
-    next();
-  });
-}
+// DEV_BEARER removed for security - use proper authentication flow
 
 app.use(
   [
@@ -182,19 +220,12 @@ app.use(
   normalizeDataSourceBody
 );
 
-// Proxies (order matters)
-app.use("/api/ai",   aiServiceProxy);
-app.use("/api/auth", authServiceProxy);
-app.use("/api",      dataServiceProxy);
-
-
 // ──────────────────────────────── Proxies ───────────────────────────────────
-// NOTE: Our data proxy STRIPS the '^/api' prefix, so the upstream sees bare routes.
-// The data-service also mounts '/api/*' internally for flexibility, but the gateway
-// forwards '/api/*' and removes the prefix at the proxy layer. Order matters: specific first.
-app.use("/api/ai",   aiServiceProxy);     // rewrites ^/api/ai → /api on upstream
-app.use("/api/auth", authServiceProxy);   // rewrites ^/api/auth → /auth on upstream (health → /health)
-app.use("/api",      dataServiceProxy);   // strips '^/api' so upstream sees '/data-sources', etc.
+app.use("/api/pipelines", pipelineServiceProxy);     // pipelines endpoints
+app.use("/api/pipeline-runs", pipelineServiceProxy); // pipeline runs endpoints
+app.use("/api/ai",   aiServiceProxy);                // rewrites ^/api/ai → /api on upstream
+app.use("/api/auth", authServiceProxy);              // rewrites ^/api/auth → /auth on upstream (health → /health)
+app.use("/api",      dataServiceProxy);              // strips '^/api' so upstream sees '/data-sources', etc.
 
 // ───────────────────────────── 404 + error handling ─────────────────────────
 app.use((req, res) => {
@@ -205,12 +236,24 @@ app.use((req, res) => {
   });
 });
 
-// Centralized JSON error handler
+// Centralized JSON error handler - sanitize error messages
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = err.status || err.statusCode || 500;
   const code = err.code || "INTERNAL_SERVER_ERROR";
-  const publicMessage = isProd ? err.publicMessage || "Internal server error" : err.message || "Internal server error";
+
+  // Always sanitize error messages - never expose internal details
+  const publicMessage = err.publicMessage || "An error occurred while processing your request";
+
+  // Log full error server-side only (never expose to client)
+  console.error(`[ERROR] ${req.method} ${req.originalUrl}:`, {
+    status,
+    code,
+    message: err.message,
+    stack: err.stack,
+    // Redact sensitive info from logs
+    user: req.headers.authorization ? '[REDACTED]' : 'anonymous',
+  });
 
   if (!res.headersSent) {
     res.status(status).json({
@@ -221,3 +264,4 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 export default app;
+
