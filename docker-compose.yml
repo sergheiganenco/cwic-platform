@@ -1,4 +1,4 @@
-﻿name: cwic-platform
+name: cwic-platform
 
 services:
   # ---------- FRONTEND ----------
@@ -35,39 +35,43 @@ services:
     build:
       context: ./backend/api-gateway
       dockerfile: Dockerfile.dev
-    ports: ["8000:8000"]
     environment:
       NODE_ENV: development
+      HOST: 0.0.0.0
       PORT: 8000
       DATA_SERVICE_URL: http://data-service:3002
       AI_SERVICE_URL: http://ai-service:3003
-      AUTH_SERVICE_URL: http://auth-service:3001        # <— was 8001
+      AUTH_SERVICE_URL: http://auth-service:3001
+      PIPELINE_SERVICE_URL: http://pipeline-service:3004
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
-      DEV_BEARER: ${DEV_BEARER}
+      # DEV_BEARER removed for security
       NO_PROXY: "localhost,127.0.0.1,api-gateway,data-service,ai-service,auth-service,pipeline-service,notification-service,integration-service,db,redis"
       no_proxy: "localhost,127.0.0.1,api-gateway,data-service,ai-service,auth-service,pipeline-service,notification-service,integration-service,db,redis"
+    ports:
+      - "8000:8000"
+    # Run tsx directly (deps are already baked into the image)
+    command: tsx --enable-source-maps src/server.ts
     volumes:
-      - ./backend/api-gateway:/app
-      - /app/node_modules
+      # Mount ONLY the files you edit; DO NOT mount package.json/lock or /app/node_modules
+      - ./backend/api-gateway/src:/app/src
+      - ./backend/api-gateway/tsconfig.json:/app/tsconfig.json
     depends_on:
       data-service:
         condition: service_healthy
       ai-service:
         condition: service_healthy
-      auth-service:                                   # <— ensure auth is up before gateway proxies to it
+      auth-service:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "node -e \"require('http').get('http://127.0.0.1:8000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
-        ]
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:8000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
       interval: 10s
       timeout: 3s
       start_period: 15s
       retries: 3
     networks:
       - cwic-network
+
+
 
   # ---------- AUTH SERVICE ----------
   auth-service:
@@ -80,10 +84,10 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3001                                      # <— listen on 3001
-      DATABASE_URL: postgresql://${DB_USER:-cwic_user}:${DB_PASSWORD:-cwic_secure_pass}@db:5432/${DB_NAME:-cwic_platform}
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: devsecret
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cwic_user}:${POSTGRES_PASSWORD:-cwic_secure_pass}@db:5432/${POSTGRES_DB:-cwic_platform}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sPokmqwvACzMaFvHYFHbb9SUgEnd5oX6tCurvAxBOdY=}@redis:6379/0
+      JWT_SECRET: ${DATA_SERVICE_JWT_SECRET:-change-me}
+      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY:-change-me-too}
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
     depends_on:
       db:
@@ -112,16 +116,16 @@ services:
     ports: ["3002:3002"]
     environment:
       NODE_ENV: development
-      SKIP_AUTH: "true"
-      JWT_SECRET: devsecret
+      SKIP_AUTH: ${DATA_SERVICE_SKIP_AUTH:-false}
+      JWT_SECRET: ${DATA_SERVICE_JWT_SECRET:-change-me}
       PORT: 3002
       HOST: 0.0.0.0
-      DATABASE_URL: ${DATABASE_URL:-postgresql://cwic_user:cwic_secure_pass@db:5432/cwic_platform}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-cwic_user}:${POSTGRES_PASSWORD:-cwic_secure_pass}@db:5432/${POSTGRES_DB:-cwic_platform}}
       ENABLE_FILE_LOGGING: "false"
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
       CHOKIDAR_USEPOLLING: "1"
       CHOKIDAR_INTERVAL: "300"
-      REDIS_URL: redis://redis:6379/0                 # <— add /0 for consistency
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sPokmqwvACzMaFvHYFHbb9SUgEnd5oX6tCurvAxBOdY=}@redis:6379/0
     volumes:
       - ./backend/data-service:/app
       - /app/node_modules
@@ -174,12 +178,28 @@ services:
       NODE_ENV: development
       HOST: 0.0.0.0
       PORT: 3004
+      SERVICE_NAME: pipeline-service
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-cwic_user}:${POSTGRES_PASSWORD:-cwic_secure_pass}@db:5432/${POSTGRES_DB:-cwic_platform}}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sPokmqwvACzMaFvHYFHbb9SUgEnd5oX6tCurvAxBOdY=}@redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-sPokmqwvACzMaFvHYFHbb9SUgEnd5oX6tCurvAxBOdY=}
+      DATA_SERVICE_URL: http://data-service:3002
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+      SKIP_AUTH: ${DATA_SERVICE_SKIP_AUTH:-false}
+      PIPELINE_WORKER_CONCURRENCY: 2
     ports:
       - "3004:3004"
     volumes:
       - ./backend/pipeline-service:/app
       - /app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      data-service:
+        condition: service_healthy
     networks:
       - cwic-network
     restart: unless-stopped
@@ -187,7 +207,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "node -e \"require('http').get('http://127.0.0.1:3004/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+          "node -e \"require('http').get('http://127.0.0.1:3004/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1)}\""
         ]
       interval: 30s
       timeout: 10s
@@ -259,7 +279,7 @@ services:
     environment:
       POSTGRES_DB: ${DB_NAME:-cwic_platform}
       POSTGRES_USER: ${DB_USER:-cwic_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-cwic_secure_pass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cwic_secure_pass}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -276,11 +296,16 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-sPokmqwvACzMaFvHYFHbb9SUgEnd5oX6tCurvAxBOdY=}
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-sPokmqwvACzMaFvHYFHbb9SUgEnd5oX6tCurvAxBOdY=}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -294,7 +319,8 @@ services:
     profiles: ["search"]
     environment:
       discovery.type: single-node
-      xpack.security.enabled: "false"
+      xpack.security.enabled: "true"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-El@st1c_S3cur3_P@ss_2025!}
       ES_JAVA_OPTS: -Xms512m -Xmx512m
     ports:
       - "9200:9200"
@@ -322,3 +348,10 @@ networks:
 volumes:
   pgdata:
   redisdata:
+
+
+
+
+
+
+

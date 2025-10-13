@@ -3,6 +3,7 @@ type Upstreams = {
   dataService: string;
   authService: string;
   aiService: string;
+  pipelineService: string;
 };
 
 function envOr(def: string, ...keys: string[]): string {
@@ -27,8 +28,12 @@ export function resolveUpstreams(): Upstreams {
       "AUTH_SERVICE_URL"
     ),
     aiService: envOr(
-      "http://ai-service:3003",
+      isDev ? "http://ai-service:3003" : "http://ai-service:3003",
       "AI_SERVICE_URL"
+    ),
+    pipelineService: envOr(
+      isDev ? "http://pipeline-service:3004" : "http://pipeline-service:3004",
+      "PIPELINE_SERVICE_URL"
     )
   };
 }

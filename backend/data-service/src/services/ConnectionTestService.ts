@@ -1,5 +1,7 @@
-import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3'
+﻿import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3'
 import axios, { AxiosError } from 'axios'
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 import { MongoClient } from 'mongodb'
 import {
   createConnection as createMySQLConnection,
@@ -34,6 +36,33 @@ const normalizeType = (t?: string): DataSourceType | undefined => {
     return 'mssql' as DataSourceType
   return x as DataSourceType
 }
+
+const outboundHostAllowlist = new Set(
+  (process.env.OUTBOUND_HOST_ALLOWLIST || '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean),
+)
+
+const blockedHostnames = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '[::1]',
+  '0.0.0.0',
+  'metadata.google.internal',
+  'metadata.google.internal.',
+])
+
+const blockedIpAddresses = new Set([
+  '0.0.0.0',
+  '127.0.0.1',
+  '169.254.169.254',
+  '::',
+  '::1',
+  '::ffff:127.0.0.1',
+  '::ffff:169.254.169.254',
+])
 
 export class ConnectionTestService {
   /* =========================================================================
@@ -370,6 +399,8 @@ export class ConnectionTestService {
     const api = c as APIConfig
     if (!api.baseUrl) throw new Error('Base URL is required for API connections')
 
+    const safeUrl = await this.assertSafeHttpEndpoint(api.baseUrl)
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': 'CWIC-Data-Service/1.0',
@@ -398,7 +429,7 @@ export class ConnectionTestService {
     }
 
     try {
-      const response = await axios.get(api.baseUrl, {
+      const response = await axios.get(safeUrl.toString(), {
         headers,
         timeout: (api as any).timeout || 30_000,
         validateStatus: (s) => s < 500,
@@ -516,7 +547,7 @@ export class ConnectionTestService {
 
     const protocol = c.ssl ? 'https' : 'http'
     const port = c.port || 9200
-    const baseUrl = `${protocol}://${c.host}:${port}`
+    const baseUrl = (await this.assertSafeHttpEndpoint(`${protocol}://${c.host}:${port}`)).toString()
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (c.username && c.password) {
@@ -645,28 +676,26 @@ export class ConnectionTestService {
   private async mssqlListDatabases(cfg: any): Promise<Array<{ name: string }>> {
     try {
       const mssql = require('mssql');
-      
+
       const config = {
-        server: cfg.host,
+        server: cfg.host || cfg.server,
         port: Number(cfg.port || 1433),
-        user: cfg.username,
+        user: cfg.username || cfg.user,
         password: cfg.password,
         database: 'master', // Connect to master for server-level queries
         options: {
-          encrypt: !!cfg.ssl, // Required for Azure SQL
-          trustServerCertificate: !cfg.ssl, // For self-signed certs
+          encrypt: cfg.ssl !== false, // Required for Azure SQL, default to true
+          trustServerCertificate: cfg.ssl === false, // For self-signed certs
           enableArithAbort: true,
         },
         connectionTimeout: cfg.timeout || 15000,
         requestTimeout: cfg.timeout || 15000,
       };
 
-      console.log('🔍 MSSQL Discovery: Connecting to server...', { host: cfg.host, port: cfg.port });
       
       const pool = await mssql.connect(config);
       
       try {
-        console.log('🔍 MSSQL Discovery: Connected, querying databases...');
         
         const result = await pool.request().query(`
           SELECT name 
@@ -678,18 +707,15 @@ export class ConnectionTestService {
         `);
         
         const databases = result.recordset.map((row: any) => ({ name: row.name }));
-        console.log('🔍 MSSQL Discovery: Found databases:', databases);
         
         return databases;
       } finally {
         await pool.close();
-        console.log('🔍 MSSQL Discovery: Connection closed');
       }
     } catch (error) {
-      console.error('❌ MSSQL database discovery failed:', error);
+      logger.warn('MSSQL database discovery failed', { error: (error as Error)?.message || String(error) });
       // Return known database as fallback for Azure SQL
       if (cfg.host?.includes('database.windows.net')) {
-        console.log('🔍 MSSQL Discovery: Azure SQL detected, trying common patterns...');
         return [{ name: 'Feya_Db' }]; // Your known database
       }
       return []; // Return empty array on failure for other cases
@@ -718,6 +744,102 @@ export class ConnectionTestService {
   }
 
   /* ========================================================================= */
+
+  private async assertSafeHttpEndpoint(rawUrl: string): Promise<URL> {
+    let parsed: URL
+    try {
+      parsed = new URL(rawUrl)
+    } catch {
+      throw new Error('Base URL must be a valid absolute URL')
+    }
+
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('Only http(s) URLs are allowed for connection tests')
+    }
+
+    const hostname = parsed.hostname
+    const normalizedHost = hostname.toLowerCase()
+
+    if (outboundHostAllowlist.has(normalizedHost)) {
+      return parsed
+    }
+
+    if (blockedHostnames.has(normalizedHost)) {
+      throw new Error('Target host is not permitted')
+    }
+
+    const addresses: string[] = []
+    if (isIP(hostname)) {
+      addresses.push(hostname)
+    } else {
+      try {
+        const results = await lookup(hostname, { all: true, family: 0 })
+        results.forEach((entry) => addresses.push(entry.address))
+      } catch {
+        throw new Error(`Unable to resolve host ${hostname}`)
+      }
+    }
+
+    if (!addresses.length) {
+      throw new Error(`Unable to resolve host ${hostname}`)
+    }
+
+    for (const address of addresses) {
+      const lowered = address.toLowerCase()
+      if (blockedIpAddresses.has(lowered)) {
+        throw new Error('Target host is not permitted')
+      }
+
+      if (this.isLoopbackOrLinkLocal(lowered)) {
+        throw new Error('Refusing to contact loopback or link-local addresses')
+      }
+    }
+
+    return parsed
+  }
+
+  private isLoopbackOrLinkLocal(address: string): boolean {
+    const kind = isIP(address)
+    if (kind === 4) {
+      const parts = address.split('.').map((segment) => Number(segment))
+      // Loopback (127.0.0.0/8)
+      if (parts[0] === 127) return true
+      // Current network (0.0.0.0/8)
+      if (parts[0] === 0) return true
+      // Link-local (169.254.0.0/16)
+      if (parts[0] === 169 && parts[1] === 254) return true
+      // Private networks - block all RFC1918 ranges
+      // 10.0.0.0/8
+      if (parts[0] === 10) return true
+      // 172.16.0.0/12
+      if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
+      // 192.168.0.0/16
+      if (parts[0] === 192 && parts[1] === 168) return true
+      // Multicast (224.0.0.0/4) and reserved (240.0.0.0/4)
+      if (parts[0] >= 224) return true
+      return false
+    }
+
+    if (kind === 6) {
+      const normalized = address.toLowerCase()
+      // Loopback
+      if (normalized === '::1') return true
+      // Unspecified
+      if (normalized === '::') return true
+      // Link-local (fe80::/10)
+      if (normalized.startsWith('fe80')) return true
+      // Unique local addresses (fc00::/7)
+      if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true
+      // IPv4-mapped IPv6 addresses
+      if (normalized.startsWith('::ffff:')) {
+        const mapped = normalized.replace('::ffff:', '')
+        return this.isLoopbackOrLinkLocal(mapped)
+      }
+      return false
+    }
+
+    return false
+  }
 
   public async testMultipleConnections(
     dataSources: DataSource[],
@@ -758,3 +880,11 @@ export class ConnectionTestService {
     ]
   }
 }
+
+
+
+
+
+
+
+

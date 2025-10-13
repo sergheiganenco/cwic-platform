@@ -4,6 +4,7 @@ import { performance } from 'perf_hooks';
 import { Pool, PoolClient, PoolConfig } from 'pg';
 import { z } from 'zod';
 import { logger } from '../utils/logger';
+import { decryptConfig, isEncryptedConfig } from '../utils/secrets';
 import { DatabaseService } from './DatabaseService';
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -427,7 +428,10 @@ export class QualityService {
 
         if (ds.rows?.length) {
           const cfgRaw = (ds.rows[0] as { connection_config: any }).connection_config;
-          const cfg = typeof cfgRaw === 'string' ? safeJsonParse(cfgRaw) : cfgRaw;
+          let cfg = typeof cfgRaw === 'string' ? safeJsonParse(cfgRaw) : cfgRaw;
+          if (isEncryptedConfig(cfg)) {
+            cfg = decryptConfig(cfg);
+          }
           if (cfg?.connectionString) connectionString = String(cfg.connectionString);
           if (typeof cfg?.ssl === 'boolean') ssl = !!cfg.ssl;
         }

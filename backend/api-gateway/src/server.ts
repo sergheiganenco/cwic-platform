@@ -28,7 +28,7 @@ process.on("uncaughtException", (e) => err("uncaughtException:", e));
 process.on("unhandledRejection", (r) => err("unhandledRejection:", r as any));
 
 const shutdown = (signal: NodeJS.Signals) => {
-  log(`${signal} received → closing server...`);
+  log(`${signal} received → closing server.`);
   server.close((closeErr) => {
     if (closeErr) err("error during close:", closeErr);
     process.exit(0);

@@ -4,6 +4,7 @@ import type { ConnectionConfig } from "../../models/Connection";
 import type { DataSourceType } from "../../models/DataSource";
 import { logger } from "../../utils/logger";
 import { AzureSqlConnector } from "./azureSql";
+import { PostgreSQLConnector } from "./postgresql";
 import { BaseConnector } from "./base";
 
 // Fix: Use generic constraint that works with union types
@@ -15,6 +16,7 @@ export interface ConnectorConstructor<TConfig extends ConnectionConfig = Connect
 const normalizeType = (t: string): DataSourceType => {
   const x = (t || "").toLowerCase();
   if (x === "azure_sql" || x === "azure-sql" || x === "sqlserver" || x === "sql-server") return "mssql";
+  if (x === "postgres") return "postgresql";
   return x as DataSourceType;
 };
 
@@ -28,6 +30,10 @@ export class ConnectorFactory {
     ConnectorFactory.registerConnector("mssql", AzureSqlConnector as ConnectorConstructor<any>);
     ConnectorFactory.registerConnector("azure-sql", AzureSqlConnector as ConnectorConstructor<any>);
     ConnectorFactory.registerConnector("azure_sql", AzureSqlConnector as ConnectorConstructor<any>);
+
+    // Register PostgreSQL connector
+    ConnectorFactory.registerConnector("postgresql", PostgreSQLConnector as ConnectorConstructor<any>);
+    ConnectorFactory.registerConnector("postgres", PostgreSQLConnector as ConnectorConstructor<any>);
   }
 
   static registerConnector(type: DataSourceType | string, ctor: ConnectorConstructor<any>): void {

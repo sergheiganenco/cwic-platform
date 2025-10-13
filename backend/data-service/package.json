@@ -52,14 +52,14 @@
     "mssql": "^10.0.4",
     "multer": "^1.4.5-lts.1",
     "mysql2": "^3.6.5",
-    "nanoid": "^4.0.2",
+    "nanoid": "^5.0.9",
     "pg": "^8.16.3",
     "pg-copy-streams": "^7.0.0",
     "redis": "^4.6.10",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
-    "xlsx": "^0.18.5",
-    "zod": "^4.1.8"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

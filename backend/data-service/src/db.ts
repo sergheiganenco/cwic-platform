@@ -213,7 +213,14 @@ class Database {
       checks.connectivity = true;
 
       // Test write capability (create temp table and drop it)
-      const tempTableName = `health_check_${Date.now()}`;
+      // Use secure random string and validate prefix to prevent SQL injection
+      const crypto = require('crypto');
+      const randomSuffix = crypto.randomBytes(8).toString('hex');
+      const tempTableName = `health_check_${randomSuffix}`;
+      // Validate that the table name only contains safe characters
+      if (!/^health_check_[a-f0-9]+$/.test(tempTableName)) {
+        throw new Error('Invalid temp table name generated');
+      }
       await this.pool.query(`CREATE TEMP TABLE ${tempTableName} (id INTEGER)`);
       await this.pool.query(`INSERT INTO ${tempTableName} VALUES (1)`);
       await this.pool.query(`DROP TABLE ${tempTableName}`);

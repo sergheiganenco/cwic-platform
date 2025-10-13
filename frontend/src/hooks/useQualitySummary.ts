@@ -1,84 +1,149 @@
-// src/hooks/useQualitySummary.ts
-import { useCallback, useEffect, useState } from 'react';
+﻿// src/hooks/useQualitySummary.ts
+import { useCallback, useEffect, useMemo, useState } from 'react';
+
+type Timeframe = '24h' | '7d' | '30d' | '90d';
+
+export interface QualitySummarySource {
+  id: string | null;
+  name: string;
+  type: string | null;
+  typeLabel: string;
+  host: string | null;
+  status: string | null;
+  totalAssets: number;
+  monitoredAssets: number;
+  totalChecks: number;
+  passed: number;
+  failed: number;
+  error: number;
+  skipped: number;
+  timeout: number;
+  passRate: number;
+  lastRunAt: string | null;
+  ruleCount: number;
+}
+
+export interface QualitySummaryTotals {
+  totalChecks: number;
+  passed: number;
+  failed: number;
+  error: number;
+  skipped: number;
+  timeout: number;
+  passRate: number;
+  avgExecMs: number;
+  overallScore: number;
+}
 
 export interface QualitySummary {
-  assetsScored: number;
-  overallScore: number; // 0–100
-  passedChecks: number;
-  failedChecks: number;
-  warnings: number;
-  byDimension: Record<'accuracy'|'completeness'|'consistency'|'timeliness'|'uniqueness'|'validity', number>;
+  timeframe: Timeframe;
+  from: string;
+  to: string;
+  totals: QualitySummaryTotals;
+  statusBreakdown: Array<{ key: string; count: number }>;
+  sourceBreakdown: QualitySummarySource[];
+  ruleCounts: {
+    total: number;
+    active: number;
+    disabled: number;
+  };
+  assetCoverage: {
+    totalAssets: number;
+    monitoredAssets: number;
+  };
+  unassigned: QualitySummarySource | null;
 }
 
 interface UseQualitySummaryOptions {
-  filters?: { dataSourceId?: string; owner?: string; classification?: string };
+  timeframe?: Timeframe;
+  filters?: Record<string, string | number | undefined>;
   enabled?: boolean;
-  refreshInterval?: number; // ms; disabled in dev
+  refreshInterval?: number; // ms; optional auto-refresh
 }
 
-const mock: QualitySummary = {
-  assetsScored: 412,
-  overallScore: 82,
-  passedChecks: 1245,
-  failedChecks: 97,
-  warnings: 186,
-  byDimension: {
-    accuracy: 79,
-    completeness: 85,
-    consistency: 81,
-    timeliness: 76,
-    uniqueness: 88,
-    validity: 84
-  }
+const mockSummary: QualitySummary = {
+  timeframe: '7d',
+  from: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+  to: new Date().toISOString(),
+  totals: {
+    totalChecks: 0,
+    passed: 0,
+    failed: 0,
+    error: 0,
+    skipped: 0,
+    timeout: 0,
+    passRate: 0,
+    avgExecMs: 0,
+    overallScore: 0,
+  },
+  statusBreakdown: [],
+  sourceBreakdown: [],
+  ruleCounts: { total: 0, active: 0, disabled: 0 },
+  assetCoverage: { totalAssets: 0, monitoredAssets: 0 },
+  unassigned: null,
 };
 
 export function useQualitySummary(opts: UseQualitySummaryOptions = {}) {
-  const { filters = {}, enabled = true, refreshInterval = 0 } = opts;
+  const {
+    timeframe = '7d',
+    filters = {},
+    enabled = true,
+    refreshInterval = 0,
+  } = opts;
   const [data, setData] = useState<QualitySummary | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const queryString = useMemo(() => {
+    const qs = new URLSearchParams({ timeframe });
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        qs.set(key, String(value));
+      }
+    });
+    return qs.toString();
+  }, [filters, timeframe]);
 
   const fetcher = useCallback(async () => {
     if (!enabled) return;
     setIsLoading(true);
     setError(null);
 
+    const allowMocks = import.meta.env.VITE_USE_MOCKS === '1';
+
     try {
-      const qs = new URLSearchParams();
-      Object.entries(filters).forEach(([k, v]) => {
-        if (v) qs.set(k, String(v));
+      const res = await fetch(`/api/quality/summary?${queryString}`, {
+        headers: { accept: 'application/json' },
+        credentials: 'include',
       });
 
-      if (import.meta.env.MODE === 'development') {
-        await new Promise(r => setTimeout(r, 500));
-        setData(mock);
-        return;
-      }
-
-      const res = await fetch(`/api/quality/summary?${qs.toString()}`, { headers: { accept: 'application/json' } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as QualitySummary;
-      setData(json);
+
+      const json = await res.json();
+      const payload = (json?.data ?? json) as QualitySummary;
+      setData(payload);
     } catch (e: any) {
-      const useMocks = import.meta.env.MODE === 'development' && import.meta.env.VITE_USE_MOCKS !== '0';
-     if (useMocks) {
-        console.warn('quality/summary not available, using mock');
-        setData(mock);
+      if (allowMocks) {
+        console.warn('[useQualitySummary] Falling back to mock data:', e?.message || e);
+        setData(mockSummary);
       } else {
         setError(e?.message || 'Failed to load quality summary');
       }
     } finally {
       setIsLoading(false);
     }
-  }, [filters, enabled]);
-
-  useEffect(() => { fetcher(); }, [fetcher]);
+  }, [enabled, queryString]);
 
   useEffect(() => {
-    if (refreshInterval > 0 && import.meta.env.MODE !== 'development') {
+    fetcher();
+  }, [fetcher]);
+
+  useEffect(() => {
+    if (refreshInterval > 0) {
       const id = setInterval(fetcher, refreshInterval);
       return () => clearInterval(id);
     }
+    return undefined;
   }, [refreshInterval, fetcher]);
 
   return { data, isLoading, error, refresh: fetcher };

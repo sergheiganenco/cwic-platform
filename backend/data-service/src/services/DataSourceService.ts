@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import {
   ConnectionConfig,
   DataSource,
@@ -7,6 +7,7 @@ import {
   DataSourceType,
 } from '../models/DataSource';
 import { logger } from '../utils/logger';
+import { decryptConfig, encryptConfig, isEncryptedConfig, maskSecrets } from '../utils/secrets';
 import { ConnectionTestService } from './ConnectionTestService';
 import { DatabaseService } from './DatabaseService';
 
@@ -133,14 +134,35 @@ export class DataSourceService {
     return [];
   }
 
+  private encryptConnectionConfig(config: ConnectionConfig): string {
+    return JSON.stringify(encryptConfig(config));
+  }
+
+  private decryptConnectionConfig(raw: any, fallbackType?: DataSourceType): ConnectionConfig {
+    const parsed = this.coerceJSON(raw, {});
+
+    if (isEncryptedConfig(parsed)) {
+      return decryptConfig<ConnectionConfig>(parsed);
+    }
+
+    if (parsed && typeof parsed === 'object') {
+      return parsed as ConnectionConfig;
+    }
+
+    return { type: (fallbackType as any) ?? 'api' } as ConnectionConfig;
+  }
+
+  private maskConnectionConfig(config: ConnectionConfig): ConnectionConfig {
+    return maskSecrets(config) as ConnectionConfig;
+  }
+
   private toConnectionConfig(raw: any, fallbackType?: DataSourceType): ConnectionConfig {
     try {
-      const obj = raw == null ? {} : (typeof raw === 'string' ? JSON.parse(raw) : raw);
-      if (obj && typeof obj === 'object') {
-        return obj as ConnectionConfig;
-      }
-    } catch { /* ignore */ }
-    return { type: (fallbackType as any) ?? 'api' } as ConnectionConfig;
+      return this.decryptConnectionConfig(raw, fallbackType);
+    } catch (error) {
+      logger.error('Failed to parse connection config', { error: (error as Error).message });
+      throw error;
+    }
   }
 
   private mapRowToDataSource(row: any): DataSource {
@@ -269,7 +291,7 @@ export class DataSourceService {
         data.description ?? null,
         normalizeType(data.type) ?? data.type!,
         data.status ?? ('pending' as DataSourceStatus),
-        JSON.stringify(connectionCfg),
+        this.encryptConnectionConfig(connectionCfg),
         Array.isArray(data.tags) ? data.tags : [],
         JSON.stringify(data.metadata ?? {}),
         now,
@@ -305,7 +327,7 @@ export class DataSourceService {
       if (patch.status !== undefined)      push(`status = $${i++}`, patch.status);
       if (patch.connectionConfig !== undefined) {
         const cfg = this.toConnectionConfig(patch.connectionConfig, (patch.type as any) ?? existing.type);
-        push(`connection_config = $${i++}::jsonb`, JSON.stringify(cfg));
+        push(`connection_config = $${i++}::jsonb`, this.encryptConnectionConfig(cfg));
       }
       if (patch.tags !== undefined)        push(`tags = $${i++}::text[]`, Array.isArray(patch.tags) ? patch.tags : []);
       if (patch.metadata !== undefined)    push(`metadata = $${i++}::jsonb`, JSON.stringify(patch.metadata ?? {}));
@@ -346,6 +368,17 @@ export class DataSourceService {
       logger.error('DataSourceService.deleteDataSource failed:', error);
       throw error;
     }
+  }
+
+  public sanitizeDataSource(ds: DataSource): DataSource {
+    return {
+      ...ds,
+      connectionConfig: this.maskConnectionConfig(ds.connectionConfig),
+    };
+  }
+
+  public sanitizeDataSources(list: DataSource[]): DataSource[] {
+    return list.map((item) => this.sanitizeDataSource(item));
   }
 
   /* ============================== Health & Schema ============================== */
@@ -444,3 +477,6 @@ export class DataSourceService {
     }
   }
 }
+
+
+

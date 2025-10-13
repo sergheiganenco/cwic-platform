@@ -193,9 +193,36 @@ export const AssetGrid: React.FC<AssetGridProps> = ({
             <h3 className="text-lg font-semibold text-gray-900 mb-1 group-hover:text-blue-600 transition-colors">
               {asset.name}
             </h3>
-            <p className="text-sm text-gray-500 mb-2">
-              {asset.schema}.{asset.table}
-            </p>
+            {/* Data Source and Schema */}
+            {(asset.dataSourceName || asset.schema) && (
+              <div className="flex items-center gap-1.5 text-sm text-gray-500 mb-2">
+                <Database className="h-3.5 w-3.5" />
+                <span>
+                  {asset.dataSourceName || 'Unknown Source'}
+                  {asset.dataSourceType && ` (${asset.dataSourceType})`}
+                  {asset.schema && ` · ${asset.schema}`}
+                  {asset.table && asset.table !== asset.name && ` · ${asset.table}`}
+                </span>
+              </div>
+            )}
+            {/* Asset Metadata */}
+            <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
+              {asset.type && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 rounded">
+                  <span className="capitalize">{asset.type}</span>
+                </span>
+              )}
+              {asset.rowCount !== undefined && asset.rowCount !== null && (
+                <span className="inline-flex items-center gap-1">
+                  <span>{Number(asset.rowCount).toLocaleString()} rows</span>
+                </span>
+              )}
+              {asset.updatedAt && (
+                <span className="inline-flex items-center gap-1">
+                  Updated {new Date(asset.updatedAt).toLocaleDateString()}
+                </span>
+              )}
+            </div>
             {asset.description && (
               <p className="text-sm text-gray-600 line-clamp-2">
                 {asset.description}

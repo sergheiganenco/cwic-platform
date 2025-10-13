@@ -5,17 +5,25 @@ import jwt from 'jsonwebtoken';
 const IS_PROD = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 
 function devBypass(req: Request): boolean {
-  const hdr = (req.get('X-Dev-Auth') || req.get('x-dev-auth') || '').trim();
+  // Removed X-Dev-Auth header bypass for security
+  // Only allow SKIP_AUTH in local development with explicit warnings
   const envSkip = (process.env.SKIP_AUTH || '').toLowerCase() === 'true';
-  const envMock = (process.env.MOCK_AUTH || '').toLowerCase() === 'true';
-  return !IS_PROD && (envSkip || envMock || hdr === '1');
+  if (envSkip && !IS_PROD) {
+    console.warn('⚠️  WARNING: SKIP_AUTH is enabled - authentication is DISABLED! For local development only.');
+  }
+  return !IS_PROD && envSkip;
 }
 
 function getJwtSecret(): string {
   const s = (process.env.JWT_SECRET || '').trim();
-  if (s) return s;
-  if (!IS_PROD) return 'devsecret';
-  throw new Error('JWT is not configured (missing JWT_SECRET).');
+  if (!s) {
+    throw new Error('JWT_SECRET is required - set it in your environment variables');
+  }
+  // Validate minimum secret length
+  if (s.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters long for security');
+  }
+  return s;
 }
 
 function extractToken(req: Request): string | undefined {

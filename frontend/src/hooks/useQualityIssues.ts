@@ -6,13 +6,24 @@ export interface QualityIssue {
   assetId: string;
   assetName: string;
   rule: string;
-  dimension: 'accuracy'|'completeness'|'consistency'|'timeliness'|'uniqueness'|'validity';
+  dimension: 'accuracy'|'completeness'|'consistency'|'timeliness'|'uniqueness'|'validity'|'freshness';
   severity: 'low'|'medium'|'high'|'critical';
-  status: 'open'|'acknowledged'|'in_progress'|'resolved';
+  status: 'open'|'acknowledged'|'in_progress'|'resolved'|'false_positive'|'wont_fix';
   owner?: string;
   createdAt: string;
   updatedAt?: string;
   details?: string;
+  title?: string;
+  description?: string;
+  affected_rows?: number;
+  table_name?: string;
+  schema_name?: string;
+  data_source_name?: string;
+  first_seen_at?: string;
+  last_seen_at?: string;
+  occurrence_count?: number;
+  root_cause?: string;
+  remediation_plan?: string;
 }
 
 export interface QualityIssuesFilters {

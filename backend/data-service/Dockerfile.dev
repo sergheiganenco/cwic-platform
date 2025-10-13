@@ -2,18 +2,18 @@
 FROM node:20-alpine
 WORKDIR /app
 
-# 1) copy manifests first
-COPY package*.json ./
+# 1) copy only package.json (not package-lock since we're in a workspace)
+COPY package.json ./
 
-# 2) lockfile-aware install (only use npm ci when lockfileVersion exists)
-RUN if [ -s package-lock.json ] && grep -q '"lockfileVersion"' package-lock.json; then \
-    npm ci --no-audit --no-fund; \
-    else \
-    echo "No valid package-lock.json → using npm install"; \
-    npm install --no-audit --no-fund; \
-    fi
+# 2) Install dependencies (use npm install for dev, ignore scripts to speed up)
+RUN npm install --ignore-scripts --no-audit --no-fund || npm install --no-audit --no-fund
 
 # 3) app files
 COPY . .
+
+# Security: Run as non-root user
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 3002
 CMD ["npm","run","dev"]

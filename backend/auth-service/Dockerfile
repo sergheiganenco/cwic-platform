@@ -19,6 +19,11 @@ FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app ./
+
+# Security: Run as non-root user
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 3001
 # try dist first, fall back to src for JS-only projects
 CMD [ "sh", "-c", "node dist/server.js 2>/dev/null || node src/server.js" ]
