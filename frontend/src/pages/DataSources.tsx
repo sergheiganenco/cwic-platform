@@ -2,6 +2,8 @@
 import {
   AlertTriangle,
   CheckCircle,
+  ChevronDown,
+  ChevronUp,
   Database,
   Grid,
   Info,
@@ -14,13 +16,19 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import AddConnectionWizard from '@/components/features/data-sources/AddConnectionWizard'
 import DataSourceCard from '@/components/features/data-sources/DataSourceCard'
+import DataSourceConfigModal from '@/components/features/data-sources/DataSourceConfigModal'
 import { Button } from '@/components/ui/Button'
+import { GradientIcon } from '@/components/ui/GradientIcon'
+import { GradientText } from '@/components/ui/GradientText'
+import { ProgressBar } from '@/components/ui/ProgressBar'
 import { useDataSources } from '@/hooks/useDataSources'
 import type {
   ConnectionTestResult,
+  DataSource,
   DataSourceStatus,
   DataSourceType,
   SyncResult
@@ -55,6 +63,7 @@ export default function DataSourcesPage() {
     refresh,
     summary,
     create,
+    update,
     remove,
     test,
     sync,
@@ -67,10 +76,14 @@ export default function DataSourcesPage() {
   const [showWizard, setShowWizard] = useState(false)
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [bulkOperationLoading, setBulkOperationLoading] = useState(false)
+  const [configuringDataSource, setConfiguringDataSource] = useState<DataSource | null>(null)
+  const [syncingDataSources, setSyncingDataSources] = useState<Set<string>>(new Set())
 
   // per-connection database browsing
   const [browsedDatabases, setBrowsedDatabases] = useState<Record<string, string[]>>({})
   const [loadingDatabases, setLoadingDatabases] = useState<Record<string, boolean>>({})
+  const [databaseSearchTerms, setDatabaseSearchTerms] = useState<Record<string, string>>({})
+  const [discoveredDatabaseCount, setDiscoveredDatabaseCount] = useState<number>(0)
 
   // filters (decoupled from hook to allow richer UI)
   const [filters, setFilters] = useState<FilterState>({
@@ -103,32 +116,100 @@ export default function DataSourcesPage() {
     setApiType(filters.type)
   }, [filters.status, filters.type, setApiStatus, setApiType])
 
+  // Function to fetch discovered database counts
+  const fetchDatabaseCounts = useCallback(async () => {
+    if (items.length === 0) {
+      setDiscoveredDatabaseCount(0)
+      return
+    }
+
+    try {
+      const counts = await Promise.all(
+        items.map(async (source) => {
+          try {
+            const dbs = await listDatabases(source.id)
+            return dbs.length
+          } catch {
+            return 1 // fallback to 1 if can't list
+          }
+        })
+      )
+      setDiscoveredDatabaseCount(counts.reduce((sum, count) => sum + count, 0))
+    } catch (error) {
+      console.error('Failed to fetch database counts:', error)
+      setDiscoveredDatabaseCount(items.length) // fallback to source count
+    }
+  }, [items, listDatabases])
+
+  // Fetch discovered database count for all sources on mount and when items change
+  useEffect(() => {
+    fetchDatabaseCounts()
+  }, [fetchDatabaseCounts])
+
+  // Custom refresh handler that also updates database counts
+  const handleRefresh = useCallback(async () => {
+    await refresh()
+    await fetchDatabaseCounts()
+  }, [refresh, fetchDatabaseCounts])
+
   const pages = Math.max(1, Math.ceil(total / Math.max(1, limit)))
 
   /* ---------------------------- derived summary --------------------------- */
   const enhancedSummary = useMemo(() => {
     const serverLevel = items.filter(it => (it.connectionConfig as any)?.scope === 'server').length
+    const databaseLevel = items.length - serverLevel
 
+    // Count total databases being tracked
     const totalDatabases = items.reduce((sum, it) => {
       const cfg = it.connectionConfig as any
       // count multiple only if repo stores them; otherwise count 1
       return sum + (Array.isArray(cfg?.databases) ? cfg.databases.length : 1)
     }, 0)
 
-    const withUsage = items.filter(
-      it => !!it.usage && (it.usage.queriesCount > 0 || !!it.usage.lastUsed),
+    // Count unique servers (group by host:port)
+    const uniqueServers = new Set(
+      items.map(it => {
+        const cfg = it.connectionConfig as any
+        const host = cfg?.host || cfg?.server || 'unknown'
+        const port = cfg?.port || ''
+        return `${host}:${port}`
+      })
+    ).size
+
+    const activeCount = items.filter(it => it.status === 'active' || it.status === 'connected').length
+    const errorCount = items.filter(it => it.status === 'error' || it.healthStatus?.status === 'down').length
+    const healthyCount = items.filter(it =>
+      (it.status === 'active' || it.status === 'connected') &&
+      (!it.healthStatus || it.healthStatus.status === 'healthy')
     ).length
 
     const avgHealth =
       items.length === 0
         ? 0
         : items.reduce((acc, it) => {
-            if (it.status === 'active') return acc + 100
+            if (it.status === 'active' || it.status === 'connected') return acc + 100
             if (it.status === 'error') return acc + 0
             return acc + 50
           }, 0) / items.length
 
-    return { ...summary, serverLevel, totalDatabases, withUsage, avgHealth }
+    // Find most recent activity
+    const allDates = items.flatMap(it => [it.lastSyncAt, it.lastTestAt].filter(Boolean))
+    const mostRecentActivity = allDates.length > 0
+      ? new Date(Math.max(...allDates.map(d => new Date(d!).getTime())))
+      : null
+
+    return {
+      ...summary,
+      serverLevel,
+      databaseLevel,
+      totalDatabases,
+      uniqueServers,
+      activeCount,
+      errorCount,
+      healthyCount,
+      avgHealth,
+      mostRecentActivity
+    }
   }, [items, summary])
 
   /* ------------------------------ tag catalog ----------------------------- */
@@ -239,6 +320,7 @@ export default function DataSourcesPage() {
   /* -------------------------- browse databases UI ------------------------- */
   const handleBrowseDatabases = useCallback(
     async (id: string) => {
+      // Toggle: if already loaded, collapse
       if (browsedDatabases[id]) {
         setBrowsedDatabases(prev => {
           const n = { ...prev }
@@ -248,50 +330,19 @@ export default function DataSourcesPage() {
         return
       }
 
+      // Load databases
       setLoadingDatabases(prev => ({ ...prev, [id]: true }))
       try {
-        // Find the data source
-        const dataSource = items.find(item => item.id === id);
-        if (!dataSource) {
-          console.error('Data source not found:', id);
-          setBrowsedDatabases(prev => ({ ...prev, [id]: [] }));
-          return;
-        }
-
-        console.log('🔍 Browsing databases for:', dataSource.name, dataSource.type);
-
-        // Use the same discovery endpoint as the wizard
-        const response = await fetch('http://localhost:8000/api/data-sources/databases/preview', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-dev-auth': '1',
-          },
-          body: JSON.stringify({
-            type: dataSource.type,
-            config: dataSource.connectionConfig,
-          }),
-        });
-
-        const result = await response.json();
-        console.log('🔍 Browse databases response:', result);
-        
-        if (response.ok && result.success && Array.isArray(result.data)) {
-          const dbs = result.data.map((db: any) => db.name || db);
-          console.log('✅ Found databases:', dbs);
-          setBrowsedDatabases(prev => ({ ...prev, [id]: dbs }));
-        } else {
-          console.warn('❌ Database discovery failed:', result);
-          setBrowsedDatabases(prev => ({ ...prev, [id]: [] }));
-        }
+        const dbs = await listDatabases(id);
+        setBrowsedDatabases(prev => ({ ...prev, [id]: dbs }));
       } catch (error) {
-        console.error('❌ Browse databases error:', error);
+        console.error('Failed to load databases:', error);
         setBrowsedDatabases(prev => ({ ...prev, [id]: [] }));
       } finally {
         setLoadingDatabases(prev => ({ ...prev, [id]: false }));
       }
     },
-    [browsedDatabases, items], // Add items to dependencies
+    [browsedDatabases, listDatabases],
   )
 
   /* ------------------------------ bulk actions ---------------------------- */
@@ -319,20 +370,25 @@ export default function DataSourcesPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:items-start lg:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Data Sources</h1>
-          <p className="text-gray-600 mt-1">
-            Manage server-level connections and database discovery across your data infrastructure
+          <h1 className="text-4xl font-bold flex items-center gap-3 mb-2">
+            <GradientIcon icon={Server} color="blue" size="lg" animate />
+            <GradientText from="blue-600" via="indigo-600" to="purple-600">
+              Data Sources
+            </GradientText>
+          </h1>
+          <p className="text-gray-600 text-lg">
+            Server-level connections • One connection, all databases • 60-80% less configuration
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <Button
             variant="outline"
-            onClick={refresh}
+            onClick={handleRefresh}
             disabled={loading}
-            className="flex items-center gap-2"
+            className="flex items-center gap-2 hover:scale-105 transition-all"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -340,7 +396,7 @@ export default function DataSourcesPage() {
 
           <Button
             onClick={() => setShowWizard(true)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700"
+            className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:shadow-xl transition-all"
           >
             <Plus className="w-4 h-4" />
             Add Connection
@@ -348,45 +404,145 @@ export default function DataSourcesPage() {
         </div>
       </div>
 
-      {/* Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-        <StatCard
-          label="Total Sources"
-          value={enhancedSummary.total}
-          icon={<Database className="w-5 h-5" />}
-          color="blue"
-        />
-        <StatCard
-          label="Server-Level"
-          value={enhancedSummary.serverLevel}
-          icon={<Server className="w-5 h-5" />}
-          color="purple"
-          subtitle={`${enhancedSummary.totalDatabases} databases`}
-        />
-        <StatCard
-          label="Healthy"
-          value={enhancedSummary.healthy}
-          icon={<CheckCircle className="w-5 h-5" />}
-          color="green"
-        />
-        <StatCard
-          label="With Errors"
-          value={enhancedSummary.error}
-          icon={<AlertTriangle className="w-5 h-5" />}
-          color="red"
-        />
-        <StatCard
-          label="Active Usage"
-          value={enhancedSummary.withUsage}
-          icon={<TrendingUp className="w-5 h-5" />}
-          color="indigo"
-        />
-        <StatCard
-          label="Avg Health"
-          value={`${Math.round(enhancedSummary.avgHealth)}%`}
-          icon={<Shield className="w-5 h-5" />}
-          color="emerald"
-        />
+      {/* Summary - Quality-focused 4-card layout */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        {/* Card 1: Sources & Health Overview */}
+        <div className="bg-white rounded-2xl border-2 shadow-lg p-6 hover:shadow-2xl hover:scale-105 transition-all duration-300 ring-2 ring-blue-200 ring-offset-2">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex-1">
+              <div className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent mb-1">
+                {enhancedSummary.total}
+              </div>
+              <div className="text-sm text-gray-600 font-semibold">Total Sources</div>
+              <div className="text-xs text-blue-600 font-medium mt-1">
+                {enhancedSummary.healthyCount}/{enhancedSummary.total} Healthy
+              </div>
+            </div>
+            <GradientIcon icon={Database} color="blue" size="lg" animate />
+          </div>
+          <ProgressBar
+            value={enhancedSummary.avgHealth}
+            color="blue"
+            height="sm"
+            animate
+          />
+          <div className="mt-2 text-xs text-gray-500 text-center">
+            {Math.round(enhancedSummary.avgHealth)}% Overall Health
+          </div>
+        </div>
+
+        {/* Card 2: Server & Database Coverage */}
+        <div className="bg-white rounded-2xl border-2 shadow-lg p-6 hover:shadow-2xl hover:scale-105 transition-all duration-300 ring-2 ring-purple-200 ring-offset-2">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex-1">
+              <div className="text-sm text-gray-600 font-semibold mb-2">Coverage</div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Server className="w-4 h-4 text-purple-600" />
+                    <span className="text-sm text-gray-700">Servers</span>
+                  </div>
+                  <span className="text-2xl font-bold text-purple-600">{enhancedSummary.uniqueServers}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Database className="w-4 h-4 text-blue-600" />
+                    <span className="text-sm text-gray-700">Databases</span>
+                  </div>
+                  <span className="text-2xl font-bold text-blue-600">{discoveredDatabaseCount || enhancedSummary.totalDatabases}</span>
+                </div>
+              </div>
+            </div>
+            <GradientIcon icon={Database} color="purple" size="lg" animate />
+          </div>
+          <div className="mt-3 p-2 bg-purple-50 rounded-lg border border-purple-200">
+            <div className="text-xs text-purple-700 text-center font-medium">
+              {discoveredDatabaseCount > enhancedSummary.totalDatabases
+                ? `${enhancedSummary.totalDatabases} tracked • ${discoveredDatabaseCount - enhancedSummary.totalDatabases} available`
+                : discoveredDatabaseCount > 0
+                ? `All ${discoveredDatabaseCount} databases tracked`
+                : 'No databases discovered yet'}
+            </div>
+          </div>
+        </div>
+
+        {/* Card 3: Connection Status */}
+        <div className="bg-white rounded-2xl border-2 shadow-lg p-6 hover:shadow-2xl hover:scale-105 transition-all duration-300">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex-1">
+              <div className="text-sm text-gray-600 font-semibold mb-2">Connection Status</div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-green-600" />
+                    <span className="text-sm text-gray-700">Active</span>
+                  </div>
+                  <span className="text-2xl font-bold text-green-600">{enhancedSummary.activeCount}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-600" />
+                    <span className="text-sm text-gray-700">Errors</span>
+                  </div>
+                  <span className="text-2xl font-bold text-red-600">{enhancedSummary.errorCount}</span>
+                </div>
+              </div>
+            </div>
+            <div className={`w-16 h-16 rounded-2xl flex items-center justify-center ${
+              enhancedSummary.errorCount === 0
+                ? 'bg-gradient-to-br from-green-400 to-emerald-600'
+                : 'bg-gradient-to-br from-amber-400 to-orange-600'
+            }`}>
+              {enhancedSummary.errorCount === 0 ? (
+                <CheckCircle className="w-8 h-8 text-white" />
+              ) : (
+                <AlertTriangle className="w-8 h-8 text-white" />
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Card 4: Last Activity */}
+        <div className="bg-white rounded-2xl border-2 shadow-lg p-6 hover:shadow-2xl hover:scale-105 transition-all duration-300">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex-1">
+              <div className="text-sm text-gray-600 font-semibold mb-2">Last Activity</div>
+              {enhancedSummary.mostRecentActivity ? (
+                <>
+                  <div className="text-2xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent mb-1">
+                    {(() => {
+                      const diff = Date.now() - new Date(enhancedSummary.mostRecentActivity).getTime()
+                      const minutes = Math.floor(diff / 60000)
+                      const hours = Math.floor(minutes / 60)
+                      const days = Math.floor(hours / 24)
+
+                      if (days > 0) return `${days}d ago`
+                      if (hours > 0) return `${hours}h ago`
+                      if (minutes > 0) return `${minutes}m ago`
+                      return 'Just now'
+                    })()}
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    {new Date(enhancedSummary.mostRecentActivity).toLocaleString()}
+                  </div>
+                </>
+              ) : (
+                <div className="text-lg text-gray-400 font-medium">No activity yet</div>
+              )}
+            </div>
+            <GradientIcon icon={TrendingUp} color="indigo" size="lg" animate />
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="mt-3 w-full p-2 bg-indigo-50 hover:bg-indigo-100 rounded-lg border border-indigo-200 hover:border-indigo-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <div className="flex items-center justify-center gap-1.5 text-xs text-indigo-700 font-medium">
+              <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+              <span>{loading ? 'Refreshing...' : 'Refresh to update'}</span>
+            </div>
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -610,7 +766,7 @@ export default function DataSourcesPage() {
               <p className="text-sm text-red-600 mt-1">{error}</p>
             </div>
           </div>
-          <Button variant="outline" onClick={refresh} className="mt-4 text-red-600 border-red-200 hover:bg-red-50">
+          <Button variant="outline" onClick={handleRefresh} className="mt-4 text-red-600 border-red-200 hover:bg-red-50">
             Try Again
           </Button>
         </div>
@@ -643,45 +799,85 @@ export default function DataSourcesPage() {
             return (
               <div key={ds.id} className="relative">
                 {/* Selection checkbox overlay */}
-                <div className="absolute left-3 top-3 z-10">
-                  <input
-                    aria-label={`Select ${ds.name}`}
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={e => {
-                      setSelectedItems(prev => {
-                        const next = new Set(prev)
-                        if (e.target.checked) next.add(ds.id)
-                        else next.delete(ds.id)
-                        return next
-                      })
-                    }}
-                    className="w-4 h-4 rounded border-gray-300 text-blue-600"
-                  />
+                <div className="absolute left-4 top-4 z-20">
+                  <label className="flex items-center justify-center w-6 h-6 bg-white rounded-lg border-2 border-gray-300 hover:border-blue-500 cursor-pointer transition-all shadow-sm hover:shadow-md">
+                    <input
+                      aria-label={`Select ${ds.name}`}
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={e => {
+                        setSelectedItems(prev => {
+                          const next = new Set(prev)
+                          if (e.target.checked) next.add(ds.id)
+                          else next.delete(ds.id)
+                          return next
+                        })
+                      }}
+                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                    />
+                  </label>
                 </div>
 
                 <DataSourceCard
                     ds={ds}
+                    syncing={syncingDataSources.has(ds.id)}
                     onTest={async (id: string) => {
+                      const toastId = toast.loading('Testing connection...')
                       try {
                         const res = (await test(id)) as ConnectionTestResult | any
-                        // rely on `success` boolean (do not assume `connectionStatus`)
                         const ok = !!res?.success
                         const failMsg =
                           res?.message || (res as any)?.error || (res as any)?.errors?.[0] || 'Unknown error'
-                        alert(ok ? 'Connection successful!' : `Test failed: ${failMsg}`)
+
+                        if (ok) {
+                          toast.success('Connection successful!', { id: toastId })
+                          await handleRefresh()
+                        } else {
+                          toast.error(`Test failed: ${failMsg}`, { id: toastId })
+                        }
                       } catch (err: any) {
-                        alert(`Test failed: ${err?.message || 'Unknown error'}`)
+                        toast.error(`Test failed: ${err?.message || 'Unknown error'}`, { id: toastId })
                       }
                     }}
                     onSync={async (id: string) => {
+                      // Add to syncing set
+                      setSyncingDataSources(prev => new Set(prev).add(id))
+
+                      const toastId = toast.loading('Starting sync...')
                       try {
                         const res = (await sync(id)) as SyncResult | any
-                        const syncId = res?.syncId ?? res?.id ?? res?.jobId ?? null
-                        const status = res?.status ?? 'unknown'
-                        alert(`Sync ${status}${syncId ? ` (ID: ${syncId})` : ''}`)
+                        const ok = res?.success !== false
+
+                        if (ok) {
+                          // Show progress toast
+                          toast.success('Sync in progress - click Refresh to see updated timestamp', {
+                            id: toastId,
+                            duration: 5000
+                          })
+
+                          // Auto-stop spinner after 15 seconds
+                          setTimeout(() => {
+                            setSyncingDataSources(prev => {
+                              const next = new Set(prev)
+                              next.delete(id)
+                              return next
+                            })
+                          }, 15000)
+                        } else {
+                          toast.error('Sync failed to start', { id: toastId })
+                          setSyncingDataSources(prev => {
+                            const next = new Set(prev)
+                            next.delete(id)
+                            return next
+                          })
+                        }
                       } catch (err: any) {
-                        alert(`Sync failed: ${err?.message || 'Unknown error'}`)
+                        toast.error(`Sync failed: ${err?.message || 'Unknown error'}`, { id: toastId })
+                        setSyncingDataSources(prev => {
+                          const next = new Set(prev)
+                          next.delete(id)
+                          return next
+                        })
                       }
                     }}
                     onDelete={async (id: string) => {
@@ -695,47 +891,176 @@ export default function DataSourcesPage() {
                         }
                       }
                     }}
-                    // ADD THESE TWO HANDLERS:
                     onConfigure={(id: string) => {
-                      console.log('Configure data source:', id);
-                      // TODO: Navigate to configuration page
-                      // Example: navigate(`/data-sources/${id}/configure`)
-                      alert('Configuration page not implemented yet');
+                      const dataSource = items.find(item => item.id === id)
+                      if (dataSource) {
+                        setConfiguringDataSource(dataSource)
+                      }
                     }}
                     onBrowseDatabases={handleBrowseDatabases}
                   />
 
-                {/* Browse databases per DS */}
+                {/* Browse databases per DS - Manual Button to Load */}
                 <div className="mt-3">
-                  <Button
-                    variant="outline"
-                    onClick={() => handleBrowseDatabases(ds.id)}
-                    disabled={loadingDatabases[ds.id]}
-                    className="w-full justify-center"
-                  >
-                    {loadingDatabases[ds.id] ? 'Loading databases…' : 'Browse Databases'}
-                  </Button>
-
-                  {browsedDatabases[ds.id] && (
-                    <div className="mt-2 rounded-xl border">
-                      {browsedDatabases[ds.id].length === 0 ? (
-                        <div className="p-3 text-sm text-gray-500">No databases returned.</div>
-                      ) : (
-                        <ul className="max-h-56 overflow-auto">
-                          {browsedDatabases[ds.id].map(db => (
-                            <li key={db} className="border-b last:border-0">
-                              <button
-                                onClick={() => setScopeFromPick(ds as any, db)}
-                                className="w-full px-3 py-2 text-left text-sm hover:bg-blue-50"
-                              >
-                                {db}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
+                  {/* Show/Hide Databases button */}
+                  {!browsedDatabases[ds.id] && !loadingDatabases[ds.id] && (
+                    <Button
+                      variant="outline"
+                      onClick={() => handleBrowseDatabases(ds.id)}
+                      className="w-full justify-center gap-2 border-2 border-purple-200 hover:border-purple-400 hover:bg-purple-50 transition-all bg-gradient-to-br from-purple-50/30 to-blue-50/30"
+                    >
+                      <Database className="w-4 h-4" />
+                      Show Available Databases
+                      <ChevronDown className="w-4 h-4" />
+                    </Button>
                   )}
+
+                    {/* Loading state */}
+                    {loadingDatabases[ds.id] && !browsedDatabases[ds.id] && (
+                      <div className="rounded-xl border-2 border-purple-200 bg-gradient-to-br from-purple-50 to-blue-50 p-6 text-center">
+                        <RefreshCw className="w-8 h-8 animate-spin text-purple-600 mx-auto mb-2" />
+                        <p className="text-sm font-medium text-purple-700">Discovering databases...</p>
+                      </div>
+                    )}
+
+                    {/* Databases Display - Compact Grid/Chip Layout */}
+                    {browsedDatabases[ds.id] && (() => {
+                      // Filter databases based on search term
+                      const searchTerm = (databaseSearchTerms[ds.id] || '').toLowerCase().trim()
+                      const allDatabases = browsedDatabases[ds.id]
+                      const filteredDatabases = searchTerm
+                        ? allDatabases.filter(db => db.toLowerCase().includes(searchTerm))
+                        : allDatabases
+                      const hasSearch = searchTerm.length > 0
+                      const showSearchBar = allDatabases.length > 5 // Only show search if more than 5 databases
+
+                      return (
+                        <div className="rounded-xl border-2 border-purple-200 bg-gradient-to-br from-purple-50/30 to-blue-50/30 overflow-hidden shadow-lg animate-in slide-in-from-top-2 duration-300">
+                          {/* Header with collapse button */}
+                          <div className="bg-gradient-to-r from-purple-600 to-blue-600 px-4 py-2.5 flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-white">
+                              <Database className="w-4 h-4" />
+                              <span className="font-bold text-sm">Available Databases</span>
+                              <span className="bg-white/20 text-white px-2 py-0.5 rounded-full text-xs font-bold">
+                                {allDatabases.length}
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => {
+                                handleBrowseDatabases(ds.id) // Toggle collapse
+                                // Clear search when collapsing
+                                setDatabaseSearchTerms(prev => {
+                                  const next = { ...prev }
+                                  delete next[ds.id]
+                                  return next
+                                })
+                              }}
+                              disabled={loadingDatabases[ds.id]}
+                              className="text-white/80 hover:text-white hover:bg-white/10 p-1.5 rounded-lg transition-all"
+                              title="Hide databases"
+                            >
+                              <ChevronUp className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          {allDatabases.length === 0 ? (
+                            <div className="p-6 text-center">
+                              <Database className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                              <p className="text-sm text-gray-600 font-medium">No databases found</p>
+                              <p className="text-xs text-gray-500 mt-1">Check connection permissions</p>
+                            </div>
+                          ) : (
+                            <>
+                              {/* Search bar (only shown when > 5 databases) */}
+                              {showSearchBar && (
+                                <div className="px-4 pt-3 pb-2 bg-white/40 border-b border-purple-200">
+                                  <div className="relative">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                                    <input
+                                      type="text"
+                                      placeholder="Search databases..."
+                                      value={databaseSearchTerms[ds.id] || ''}
+                                      onChange={(e) => setDatabaseSearchTerms(prev => ({ ...prev, [ds.id]: e.target.value }))}
+                                      className="w-full pl-9 pr-3 py-1.5 text-sm border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent bg-white"
+                                    />
+                                    {hasSearch && (
+                                      <button
+                                        onClick={() => setDatabaseSearchTerms(prev => {
+                                          const next = { ...prev }
+                                          delete next[ds.id]
+                                          return next
+                                        })}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                                        title="Clear search"
+                                      >
+                                        ×
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Compact chip grid display */}
+                              <div className="p-4 max-h-80 overflow-y-auto">
+                                {filteredDatabases.length === 0 ? (
+                                  <div className="text-center py-8">
+                                    <Search className="w-10 h-10 text-gray-300 mx-auto mb-2" />
+                                    <p className="text-sm text-gray-500">No databases match "{searchTerm}"</p>
+                                    <button
+                                      onClick={() => setDatabaseSearchTerms(prev => {
+                                        const next = { ...prev }
+                                        delete next[ds.id]
+                                        return next
+                                      })}
+                                      className="text-xs text-purple-600 hover:text-purple-700 mt-2 underline"
+                                    >
+                                      Clear search
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex flex-wrap gap-2">
+                                    {filteredDatabases.map((db, idx) => {
+                                      // Find the original index for numbering
+                                      const originalIdx = allDatabases.indexOf(db)
+                                      return (
+                                        <button
+                                          key={db}
+                                          onClick={() => setScopeFromPick(ds as any, db)}
+                                          className="group flex items-center gap-2 px-3 py-2 bg-white hover:bg-purple-50 border border-purple-200 hover:border-purple-400 rounded-lg transition-all duration-200 hover:shadow-md hover:scale-105"
+                                          title={`Click to create connection for ${db}`}
+                                        >
+                                          <div className="w-6 h-6 rounded-md bg-gradient-to-br from-purple-400 to-blue-500 flex items-center justify-center text-white font-bold text-xs flex-shrink-0 shadow-sm">
+                                            {originalIdx + 1}
+                                          </div>
+                                          <span className="text-sm font-medium text-gray-700 group-hover:text-purple-700 transition-colors truncate max-w-[200px]">
+                                            {db}
+                                          </span>
+                                          <ChevronDown className="w-3.5 h-3.5 text-gray-400 group-hover:text-purple-600 transform group-hover:rotate-90 transition-transform flex-shrink-0" />
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Footer with instructions */}
+                              <div className="bg-white/60 px-4 py-2 border-t border-purple-200 flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-xs text-gray-600">
+                                  <Info className="w-3 h-3" />
+                                  Click a database chip to create a focused connection
+                                </div>
+                                <div className="text-xs text-purple-600 font-medium">
+                                  {hasSearch && filteredDatabases.length !== allDatabases.length
+                                    ? `${filteredDatabases.length} of ${allDatabases.length}`
+                                    : `${allDatabases.length} database${allDatabases.length !== 1 ? 's' : ''}`
+                                  }
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )
+                    })()}
                 </div>
               </div>
             )
@@ -774,6 +1099,24 @@ export default function DataSourcesPage() {
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Configuration Modal */}
+      {configuringDataSource && (
+        <DataSourceConfigModal
+          open={!!configuringDataSource}
+          onClose={() => setConfiguringDataSource(null)}
+          dataSource={configuringDataSource}
+          onSave={async (id, updates) => {
+            await update(id, updates)
+            await handleRefresh()
+          }}
+          onTest={async (id, config) => {
+            // Test with the form configuration (not saved config)
+            const { testDataSourceConfig } = await import('@/services/api/dataSources')
+            return await testDataSourceConfig(configuringDataSource.type, config)
+          }}
+        />
       )}
 
       {/* Wizard */}
@@ -869,9 +1212,12 @@ interface StatCardProps {
   icon: React.ReactNode
   color: 'blue' | 'purple' | 'green' | 'red' | 'indigo' | 'emerald'
   subtitle?: string
+  gradient?: boolean
+  highlight?: boolean
+  progressValue?: number
 }
 
-function StatCard({ label, value, icon, color, subtitle }: StatCardProps) {
+function StatCard({ label, value, icon, color, subtitle, gradient, highlight, progressValue }: StatCardProps) {
   const colorClasses = {
     blue: 'bg-blue-50 border-blue-200 text-blue-700',
     purple: 'bg-purple-50 border-purple-200 text-purple-700',
@@ -881,18 +1227,49 @@ function StatCard({ label, value, icon, color, subtitle }: StatCardProps) {
     emerald: 'bg-emerald-50 border-emerald-200 text-emerald-700',
   } as const
 
+  const gradientColors = {
+    blue: 'blue',
+    purple: 'purple',
+    green: 'green',
+    red: 'red',
+    indigo: 'indigo',
+    emerald: 'teal',
+  } as const
+
   return (
-    <div className="bg-white rounded-2xl border shadow-sm p-4 hover:shadow-md transition-shadow">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-2xl font-bold text-gray-900">{value}</div>
-          <div className="text-sm text-gray-600">{label}</div>
-          {subtitle && <div className="text-xs text-gray-500 mt-1">{subtitle}</div>}
+    <div className={`bg-white rounded-2xl border shadow-lg p-5 hover:shadow-2xl hover:scale-105 transition-all duration-300 ${
+      highlight ? 'ring-2 ring-purple-300 ring-offset-2' : ''
+    }`}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex-1">
+          <div className="text-3xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">
+            {value}
+          </div>
+          <div className="text-sm text-gray-600 font-semibold">{label}</div>
+          {subtitle && <div className="text-xs text-purple-600 font-medium mt-1">{subtitle}</div>}
         </div>
-        <div className={`w-12 h-12 rounded-xl border flex items-center justify-center ${colorClasses[color]}`}>
-          {icon}
-        </div>
+        {gradient ? (
+          <GradientIcon
+            icon={icon.type as any}
+            color={gradientColors[color]}
+            size="md"
+            animate
+          />
+        ) : (
+          <div className={`w-12 h-12 rounded-xl border flex items-center justify-center ${colorClasses[color]}`}>
+            {icon}
+          </div>
+        )}
       </div>
+
+      {progressValue !== undefined && (
+        <ProgressBar
+          value={progressValue}
+          color={gradientColors[color] as any}
+          height="sm"
+          animate
+        />
+      )}
     </div>
   )
 }

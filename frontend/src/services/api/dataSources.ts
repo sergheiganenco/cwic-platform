@@ -49,44 +49,50 @@ function normalizeTestResult(raw: any): ConnectionTestResult {
   const out: any = {}
 
   if (!raw || typeof raw !== 'object') {
-    out.success = true
-    out.message = 'Connection OK'
+    out.success = false
+    out.message = 'Invalid test result'
     out.testedAt = new Date().toISOString()
     return out as ConnectionTestResult
   }
 
+  // Backend wraps test result in { success: true, data: { actual result } }
+  // Unwrap if present
+  const actual = raw.data && typeof raw.data === 'object' ? raw.data : raw
+
   const successFromStatus =
-    typeof raw.status === 'string'
-      ? ['ok', 'success', 'connected', 'passed'].includes(raw.status.toLowerCase())
+    typeof actual.status === 'string'
+      ? ['ok', 'success', 'connected', 'passed'].includes(actual.status.toLowerCase())
       : undefined
   const successFromConn =
-    typeof raw.connectionStatus === 'string'
-      ? raw.connectionStatus.toLowerCase() === 'connected'
+    typeof actual.connectionStatus === 'string'
+      ? actual.connectionStatus.toLowerCase() === 'connected'
       : undefined
 
-  out.success = boolish(raw.success) ?? successFromConn ?? successFromStatus ?? false
+  out.success = boolish(actual.success) ?? successFromConn ?? successFromStatus ?? false
   out.message =
-    raw.message ||
-    raw.detail ||
-    raw.error ||
-    raw.reason ||
+    actual.message ||
+    actual.detail ||
+    actual.error ||
+    actual.reason ||
     (out.success ? 'Connection OK' : 'Connection test failed')
 
   out.testedAt =
-    toIso(raw.testedAt) ??
-    toIso(raw.timestamp) ??
-    toIso(raw.checkedAt) ??
+    toIso(actual.testedAt) ??
+    toIso(actual.timestamp) ??
+    toIso(actual.checkedAt) ??
     new Date().toISOString()
 
   out.responseTimeMs =
-    typeof raw.responseTimeMs === 'number'
-      ? raw.responseTimeMs
-      : typeof raw.latencyMs === 'number'
-      ? raw.latencyMs
+    typeof actual.responseTimeMs === 'number'
+      ? actual.responseTimeMs
+      : typeof actual.responseTime === 'number'
+      ? actual.responseTime
+      : typeof actual.latencyMs === 'number'
+      ? actual.latencyMs
       : undefined
 
   // Keep server extras (connectionStatus, metadata, etc.)
-  Object.assign(out, raw)
+  Object.assign(out, actual)
 
   return out as ConnectionTestResult
 }
@@ -260,13 +266,73 @@ export const dataSourcesApi = {
   },
 
   async sync(id: string) {
-    const res = await http.post<SyncResult>(`/data-sources/${id}/sync`)
-    return normalizeSyncResult(res.data, id)
+    // Some deployments return an envelope { success, data }, and some expose
+    // the endpoint under different route groups. Try primary + fallbacks and
+    // always unwrap the payload before normalizing. If the primary returns 5xx,
+    // attempt an alternate discovery endpoint.
+    const encoded = encodeURIComponent(id)
+    const tryNormalize = (res: any) => normalizeSyncResult((res as any)?.data?.data ?? (res as any)?.data, id)
+
+    // 1) Primary
+    try {
+      const res = await http.post<any>(`/data-sources/${encoded}/sync`)
+      return tryNormalize(res)
+    } catch (e: any) {
+      const status = e?.response?.status ?? e?.status
+      // If 404/405 or other, continue to fallbacks; for 5xx continue as well
+      if (![404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
+    }
+
+    // 2) Discover (older API): /sources/:id/discover
+    try {
+      const res = await http.post<any>(`/sources/${encoded}/discover`)
+      return tryNormalize(res)
+    } catch (e: any) {
+      const status = e?.response?.status ?? e?.status
+      if (status && ![404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
+    }
+
+    // 3) Try same path without /api base (catalog routes are mounted at root)
+    try {
+      const rootBase = (http.defaults.baseURL || '').replace(/\/?api\/?$/, '') || undefined
+      const res = await http.post<any>(`/data-sources/${encoded}/sync`, { force: true }, { baseURL: rootBase })
+      return tryNormalize(res)
+    } catch (e: any) {
+      const status = e?.response?.status ?? e?.status
+      if (status && ![404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
+    }
+
+    // 4) Async hint on root path
+    const res = await http.post<any>(`/data-sources/${encoded}/sync`, { force: true }, { params: { async: 'true' }, baseURL: (http.defaults.baseURL || '').replace(/\/?api\/?$/, '') || undefined })
+    return tryNormalize(res)
   },
 
   async getSyncStatus(id: string) {
-    const res = await http.get<SyncResult>(`/data-sources/${id}/sync/status`)
-    return normalizeSyncResult(res.data, id)
+    const encoded = encodeURIComponent(id)
+    const candidates = [
+      { method: 'get' as const, url: `/data-sources/${encoded}/sync/status` },
+      { method: 'get' as const, url: `/catalog/data-sources/${encoded}/sync/status` },
+      { method: 'get' as const, url: `/connections/${encoded}/sync/status` },
+    ]
+
+    let lastErr: unknown
+    for (const c of candidates) {
+      try {
+        const res = await http[c.method]<any>(c.url)
+        const raw = (res as any)?.data?.data ?? (res as any)?.data
+        return normalizeSyncResult(raw, id)
+      } catch (e: any) {
+        const status = e?.response?.status ?? e?.status
+        if (status && status !== 404 && status !== 405) throw e
+        lastErr = e
+      }
+    }
+
+    // Try root path without /api base
+    const rootBase = (http.defaults.baseURL || '').replace(/\/?api\/?$/, '') || undefined
+    const res = await http.get<any>(`/data-sources/${encodeURIComponent(id)}/sync/status`, { baseURL: rootBase })
+    const raw = (res as any)?.data?.data ?? (res as any)?.data
+    return normalizeSyncResult(raw, id)
   },
 
   async updateStatus(id: string, status: DataSource['status'], reason?: string) {
@@ -318,7 +384,10 @@ export const dataSourcesApi = {
 
   /** Accepts: string[], { name: string }[], or { databases: [...] } */
   async listDatabases(id: string) {
-    const { data } = await http.get(`/data-sources/${encodeURIComponent(id)}/databases`)
+    const { data: response } = await http.get(`/data-sources/${encodeURIComponent(id)}/databases`)
+    // Backend returns { success: true, data: [...] }, so extract the data array
+    const data = (response as any)?.data ?? response
+
     if (Array.isArray(data)) {
       if (data.length === 0) return [] as Array<{ name: string }>
       if (typeof data[0] === 'string') return (data as string[]).map((name) => ({ name }))

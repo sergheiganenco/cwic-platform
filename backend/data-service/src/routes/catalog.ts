@@ -55,15 +55,36 @@ async function getDataSourceById(
 /* ------------------------- Ingest (Harvest) ------------------------ */
 
 async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) {
-  const src = new PgClient({
+  // Some server-level sources may not target a specific database, or may point
+  // to a DB that doesn't exist on this server. In those cases, connect to the
+  // default 'postgres' database so that sync can proceed instead of failing.
+  const buildClient = (database: string | undefined) => new PgClient({
     host: cfg.host,
     port: Number(cfg.port ?? 5432),
-    database: cfg.database,
+    database: database || 'postgres',
     user: cfg.username,
     password: cfg.password,
     ssl: cfg.ssl === false || cfg.ssl?.mode === 'disable' ? undefined : cfg.ssl,
   });
-  await src.connect();
+
+  let src = buildClient(cfg.database);
+  try {
+    await src.connect();
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    // Postgres invalid catalog name (3D000) or explicit 'does not exist'
+    if (/does not exist/i.test(msg) || /3D000/.test(msg)) {
+      try {
+        // Retry on 'postgres' database
+        src = buildClient('postgres');
+        await src.connect();
+      } catch (e) {
+        throw err; // preserve original error if retry fails
+      }
+    } else {
+      throw err;
+    }
+  }
 
   const tables = await src.query(`
     SELECT table_schema, table_name, table_type
@@ -168,14 +189,21 @@ async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) 
 }
 
 async function ingestMSSQL(tenantId: number, dataSourceId: string, cfg: any) {
-  const pool = await mssql.connect({
+  // IMPORTANT: avoid the mssql global connection (mssql.connect) because it is
+  // a singleton. Closing it in one request can break others with
+  // "Connection is closed." Create a dedicated pool per request instead.
+  const pool = await new mssql.ConnectionPool({
     server: cfg.host || cfg.server,
     port: Number(cfg.port ?? 1433),
     database: cfg.database,
     user: cfg.username || cfg.user,
     password: cfg.password,
-    options: { encrypt: cfg.ssl !== false, trustServerCertificate: true, ...(cfg.options || {}) }
-  });
+    options: {
+      encrypt: cfg.ssl !== false,
+      trustServerCertificate: true,
+      ...(cfg.options || {}),
+    },
+  }).connect();
 
   const tables = (await pool.request().query(`
     SELECT s.name AS schema_name, t.name AS object_name, 'table' AS asset_type
@@ -883,12 +911,27 @@ router.post('/data-sources/:id/sync', async (req: Request, res: Response) => {
 
     if (doAsync) {
       res.status(202).json({ success: true, syncId: `sync_${Date.now()}` });
-      run().catch((e) => console.error('[data-service] async sync failed', e));
+      run()
+        .then(async () => {
+          // Update lastSyncAt after async sync completes
+          await cpdb.query(
+            `UPDATE data_sources SET last_sync_at = now(), updated_at = now() WHERE id::text = $1`,
+            [id]
+          );
+        })
+        .catch((e) => console.error('[data-service] async sync failed', e));
       return;
     }
 
     const result = await run();
-    ok(res, { ...result });
+
+    // Update lastSyncAt after synchronous sync completes
+    await cpdb.query(
+      `UPDATE data_sources SET last_sync_at = now(), updated_at = now() WHERE id::text = $1`,
+      [id]
+    );
+
+    ok(res, { ...result, syncId: `sync_${Date.now()}_${id}` });
   } catch (e: any) {
     fail(res, 500, e.message);
   }
