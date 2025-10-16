@@ -197,10 +197,20 @@ export class ConnectionTestService {
           ? (c.ssl as object)
           : false
 
+      // For server-level connections, use the first database from databases array or 'postgres' as default
+      let databaseName: string | undefined = toStr(c.database)
+      if (!databaseName && c.scope === 'server') {
+        if (Array.isArray(c.databases) && c.databases.length > 0) {
+          databaseName = c.databases[0]
+        } else {
+          databaseName = 'postgres' // Default PostgreSQL admin database
+        }
+      }
+
       client = new PgClient({
         host: c.host,
         port: c.port || 5432,
-        database: toStr(c.database),
+        database: databaseName,
         user: c.username,
         password: c.password,
         ssl,
@@ -263,30 +273,64 @@ export class ConnectionTestService {
     }
   }
 
-  /* ───────── SQL Server (basic placeholder) ───────── */
+  /* ───────── SQL Server ───────── */
   private async testSQLServer(ds: DataSource): Promise<ConnectionTestResult> {
     const c = ds.connectionConfig as any
-    return new Promise((resolve, reject) => {
-      setTimeout(() => {
-        if (!c.host || !c.username || !c.password) {
-          reject(new Error('Missing required connection parameters'))
-          return
-        }
-        resolve({
-          success: true,
-          details: {
-            version: 'SQL Server (placeholder)',
-            serverInfo: {
-              type: 'SQL Server',
-              host: c.host,
-              port: c.port || 1433,
-            },
-            capabilities: ['SQL', 'ACID', 'Clustering'],
+    const mssql = require('mssql')
+
+    if (!c.host || !c.username || !c.password) {
+      throw new Error('Missing required connection parameters (host, username, password)')
+    }
+
+    // For server-level connections, use the first database from databases array or 'master' as default
+    let databaseName: string | undefined = toStr(c.database)
+    if (!databaseName && c.scope === 'server') {
+      if (Array.isArray(c.databases) && c.databases.length > 0) {
+        databaseName = c.databases[0]
+      } else {
+        databaseName = 'master' // Default SQL Server system database
+      }
+    }
+
+    const config = {
+      server: c.host,
+      port: Number(c.port || 1433),
+      user: c.username,
+      password: c.password,
+      database: databaseName,
+      options: {
+        encrypt: c.ssl !== false,
+        trustServerCertificate: c.ssl === false || c.ssl === undefined,
+        enableArithAbort: true,
+      },
+      connectionTimeout: c.timeout || 30_000,
+      requestTimeout: c.timeout || 30_000,
+    }
+
+    const pool = await mssql.connect(config)
+    try {
+      const result = await pool.request().query('SELECT @@VERSION as version, SERVERPROPERTY(\'ProductVersion\') as productVersion')
+      const version = result.recordset[0]?.version
+      const productVersion = result.recordset[0]?.productVersion
+
+      return {
+        success: true,
+        details: {
+          version: productVersion || 'SQL Server',
+          serverInfo: {
+            type: 'Microsoft SQL Server',
+            host: c.host,
+            port: c.port || 1433,
+            database: databaseName,
+            fullVersion: version,
           },
-          testedAt: new Date(),
-        })
-      }, 100)
-    })
+          capabilities: ['SQL', 'ACID', 'Transactions', 'Clustering'],
+        },
+        testedAt: new Date(),
+      }
+    } finally {
+      await pool.close().catch(() => {})
+    }
   }
 
   /* ───────── MongoDB (test) ───────── */
@@ -672,53 +716,64 @@ export class ConnectionTestService {
     }
   }
 
-  // Replace the mssqlListDatabases method in your ConnectionTestService.ts
   private async mssqlListDatabases(cfg: any): Promise<Array<{ name: string }>> {
-    try {
-      const mssql = require('mssql');
+    const mssql = require('mssql');
+    const isAzureSQL = cfg.host?.includes('database.windows.net') || cfg.host?.includes('.database.azure.com');
 
+    // For Azure SQL Database, return the configured database since server-level queries aren't allowed
+    if (isAzureSQL && cfg.database) {
+      logger.info(`Azure SQL Database detected, returning configured database: ${cfg.database}`);
+      return [{ name: cfg.database }];
+    }
+
+    // For on-premises SQL Server or Azure SQL Managed Instance, try server-level query
+    try {
       const config = {
         server: cfg.host || cfg.server,
         port: Number(cfg.port || 1433),
         user: cfg.username || cfg.user,
         password: cfg.password,
-        database: 'master', // Connect to master for server-level queries
+        database: 'master',
         options: {
-          encrypt: cfg.ssl !== false, // Required for Azure SQL, default to true
-          trustServerCertificate: cfg.ssl === false, // For self-signed certs
+          encrypt: cfg.ssl !== false,
+          trustServerCertificate: cfg.ssl === false,
           enableArithAbort: true,
         },
         connectionTimeout: cfg.timeout || 15000,
         requestTimeout: cfg.timeout || 15000,
       };
 
-      
       const pool = await mssql.connect(config);
-      
+
       try {
-        
+        // Try simple query first (works on newer SQL Server versions)
         const result = await pool.request().query(`
-          SELECT name 
-          FROM sys.databases 
-          WHERE state = 0 
+          SELECT name
+          FROM sys.databases
+          WHERE state = 0
             AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
-            AND HAS_DBACCESS(name) = 1
           ORDER BY name
         `);
-        
+
         const databases = result.recordset.map((row: any) => ({ name: row.name }));
-        
+        logger.info(`Found ${databases.length} databases via sys.databases`);
         return databases;
       } finally {
         await pool.close();
       }
     } catch (error) {
-      logger.warn('MSSQL database discovery failed', { error: (error as Error)?.message || String(error) });
-      // Return known database as fallback for Azure SQL
-      if (cfg.host?.includes('database.windows.net')) {
-        return [{ name: 'Feya_Db' }]; // Your known database
+      logger.warn('MSSQL server-level database discovery failed', {
+        error: (error as Error)?.message || String(error),
+        host: cfg.host
+      });
+
+      // Fallback: return configured database if available
+      if (cfg.database) {
+        logger.info(`Falling back to configured database: ${cfg.database}`);
+        return [{ name: cfg.database }];
       }
-      return []; // Return empty array on failure for other cases
+
+      return [];
     }
   }
 
