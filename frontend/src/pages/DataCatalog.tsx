@@ -2,6 +2,13 @@
  * Data Catalog - Production Version with Fixed Filtering
  */
 
+// Extend window type for missing data sources tracking
+declare global {
+  interface Window {
+    _missingDataSources?: Set<string>;
+  }
+}
+
 import { RatingStars } from '@/components/catalog/RatingStars';
 import { TrustScoreRing } from '@/components/catalog/TrustScoreRing';
 import { Button } from '@/components/ui/Button';
@@ -18,7 +25,6 @@ import {
   Database,
   Download,
   Eye,
-  Filter,
   Grid3x3,
   LayoutList,
   MessageSquare,
@@ -32,13 +38,14 @@ import {
   Zap,
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 interface Filters {
   search: string;
   dataSourceId?: string;
+  databases?: string[]; // Changed from database to databases (array)
   schema?: string;
   type?: 'all' | 'table' | 'view';
-  showSystemTables?: boolean;
 }
 
 type ViewMode = 'grid' | 'table' | 'compact';
@@ -72,15 +79,17 @@ const isSystemTable = (asset: any): boolean => {
 };
 
 const DataCatalog: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [filters, setFilters] = useState<Filters>({
     search: '',
     type: 'all',
-    showSystemTables: false,
+    databases: [], // Initialize as empty array
   });
 
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
-  const [showFilters, setShowFilters] = useState(false);
+  const [showDatabasePicker, setShowDatabasePicker] = useState(false);
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(new Set());
   const [previewModal, setPreviewModal] = useState<{ open: boolean; data: any; loading: boolean }>({ 
     open: false, data: null, loading: false 
@@ -101,6 +110,116 @@ const DataCatalog: React.FC = () => {
 
   const { items: dataSources } = useDataSources();
 
+  const [catalogSummary, setCatalogSummary] = useState<any>(null);
+
+  // Extract unique data sources from assets for the dropdown
+  const uniqueDataSources = useMemo(() => {
+    const dsMap = new Map<string, { id: string; name: string; type: string }>();
+
+    // Add from assets
+    assets.forEach(asset => {
+      if (asset.dataSourceId && !dsMap.has(asset.dataSourceId)) {
+        dsMap.set(asset.dataSourceId, {
+          id: asset.dataSourceId,
+          name: asset.dataSourceName || 'Unknown',
+          type: asset.dataSourceType || ''
+        });
+      }
+    });
+
+    // Merge with dataSources from the hook (in case some sources have no assets)
+    dataSources.forEach(ds => {
+      if (!dsMap.has(ds.id)) {
+        dsMap.set(ds.id, {
+          id: ds.id,
+          name: ds.name,
+          type: ds.type
+        });
+      }
+    });
+
+    return Array.from(dsMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [assets, dataSources]);
+
+  // Fetch all available databases from all data sources via API
+  const [databasesByDataSource, setDatabasesByDataSource] = useState<Array<{ dataSourceId: string; dataSourceName: string; databases: Array<{ name: string; isSystem: boolean; isSynced: boolean }> }>>([]);
+
+  // Fetch available databases from all data sources
+  useEffect(() => {
+    const fetchDatabases = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (filters.dataSourceId) {
+          params.append('dataSourceId', filters.dataSourceId);
+        }
+        const response = await fetch(`/api/catalog/databases?${params}`);
+        const data = await response.json();
+        if (data.success) {
+          setDatabasesByDataSource(data.data);
+        }
+      } catch (error) {
+        console.warn('Failed to fetch databases:', error);
+      }
+    };
+    fetchDatabases();
+  }, [filters.dataSourceId]);
+
+  // Fetch catalog summary separately to get accurate counts based on current filters
+  useEffect(() => {
+    const fetchSummary = async () => {
+      try {
+        const params = new URLSearchParams();
+        params.append('objectType', 'user'); // Always exclude system tables
+
+        // Apply same filters as the main asset list
+        if (filters.dataSourceId) params.append('dataSourceId', filters.dataSourceId);
+        if (filters.databases && filters.databases.length > 0) {
+          params.append('databases', filters.databases.join(','));
+        }
+        if (filters.schema) params.append('schema', filters.schema);
+        const searchTerm = filters.search?.trim();
+        if (searchTerm) params.append('search', searchTerm);
+
+        const response = await fetch(`/api/catalog/summary?${params}`);
+        const data = await response.json();
+        if (data.success) {
+          console.log('📊 Catalog summary updated:', data.data);
+          setCatalogSummary(data.data);
+        }
+      } catch (error) {
+        console.warn('Failed to fetch catalog summary:', error);
+      }
+    };
+    fetchSummary();
+  }, [filters.dataSourceId, filters.databases, filters.schema, filters.search]);
+
+  // Handle deep linking - auto-open asset from URL parameter
+  useEffect(() => {
+    const assetId = searchParams.get('asset');
+    if (assetId && !selectedAsset) {
+      // First try to find in loaded assets
+      const asset = assets.find(a => a.id === assetId);
+      if (asset) {
+        console.log('🔗 Deep link: Opening asset from URL (found in loaded assets):', assetId);
+        setSelectedAsset(asset);
+      } else if (assets.length > 0) {
+        // If not found in loaded assets, fetch directly from API
+        console.log('🔗 Deep link: Fetching asset from API:', assetId);
+        fetch(`/api/catalog/assets/${assetId}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data.success && data.data) {
+              console.log('🔗 Deep link: Asset loaded from API:', data.data);
+              setSelectedAsset(data.data);
+            } else {
+              console.warn('🔗 Deep link: Asset not found:', assetId);
+            }
+          })
+          .catch(err => console.error('🔗 Deep link: Failed to fetch asset:', err));
+      }
+    }
+  }, [searchParams, assets, selectedAsset]);
+
   // Debug logging
   useEffect(() => {
     console.log('🔍 Filter Debug:', {
@@ -120,7 +239,9 @@ const DataCatalog: React.FC = () => {
   const normalizedSearch = filters.search.trim();
   const activeTypeFilter = filters.type !== 'all' ? filters.type : undefined;
   const activeSchemaFilter = filters.schema?.trim() ? filters.schema.trim() : undefined;
-  const objectTypeFilter = filters.showSystemTables ? undefined : 'user';
+
+  // Always filter to only user tables (exclude system tables)
+  const objectTypeFilter = 'user';
 
   // Only update server filters when they actually change
   useEffect(() => {
@@ -132,6 +253,10 @@ const DataCatalog: React.FC = () => {
 
     if (normalizedSearch) serverFilters.search = normalizedSearch;
     if (filters.dataSourceId) serverFilters.dataSourceId = filters.dataSourceId;
+    // Handle multiple databases - send as comma-separated string
+    if (filters.databases && filters.databases.length > 0) {
+      serverFilters.databases = filters.databases.join(',');
+    }
     if (activeSchemaFilter) serverFilters.schema = activeSchemaFilter;
     if (activeTypeFilter) serverFilters.type = activeTypeFilter;
 
@@ -140,6 +265,7 @@ const DataCatalog: React.FC = () => {
   }, [
     normalizedSearch,
     filters.dataSourceId,
+    filters.databases,
     activeSchemaFilter,
     activeTypeFilter,
     objectTypeFilter,
@@ -147,7 +273,7 @@ const DataCatalog: React.FC = () => {
     updateFilters,
   ]);
 
-  // Extract unique schemas based on current data source filter
+  // Extract unique schemas based on current data source and database filters
   const schemas = useMemo(() => {
     let scopedAssets = assets;
 
@@ -156,10 +282,14 @@ const DataCatalog: React.FC = () => {
       scopedAssets = scopedAssets.filter(a => compareIds(a.dataSourceId, filters.dataSourceId));
     }
 
-    // Then filter system tables if needed
-    if (!filters.showSystemTables) {
-      scopedAssets = scopedAssets.filter(a => !isSystemTable(a));
+    // Filter by databases if selected (multiple)
+    if (filters.databases && filters.databases.length > 0) {
+      const targetDatabases = filters.databases.map(normalizeString);
+      scopedAssets = scopedAssets.filter(a => targetDatabases.includes(normalizeString(a.databaseName)));
     }
+
+    // Always filter out system tables
+    scopedAssets = scopedAssets.filter(a => !isSystemTable(a));
 
     const uniqueSchemas = new Set(
       scopedAssets
@@ -168,7 +298,7 @@ const DataCatalog: React.FC = () => {
     );
 
     return Array.from(uniqueSchemas).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  }, [assets, filters.showSystemTables, filters.dataSourceId]);
+  }, [assets, filters.dataSourceId, filters.databases]);
 
   // Client-side filtering (should match server-side for consistency)
   const filteredAssets = useMemo(() => {
@@ -179,11 +309,9 @@ const DataCatalog: React.FC = () => {
       filters: filters,
     });
 
-    // System tables filter
-    if (!filters.showSystemTables) {
-      filtered = filtered.filter(a => !isSystemTable(a));
-      console.log('  After system tables filter:', filtered.length);
-    }
+    // Always filter out system tables
+    filtered = filtered.filter(a => !isSystemTable(a));
+    console.log('  After system tables filter:', filtered.length);
 
     // Search filter
     if (filters.search && filters.search.trim()) {
@@ -202,7 +330,7 @@ const DataCatalog: React.FC = () => {
       const beforeFilter = filtered.length;
       filtered = filtered.filter(a => compareIds(a.dataSourceId, filters.dataSourceId));
       console.log(`  After data source filter (${filters.dataSourceId}):`, filtered.length, 'from', beforeFilter);
-      
+
       if (filtered.length === 0 && beforeFilter > 0) {
         console.warn('⚠️ No assets after data source filter! Check ID types:', {
           filterValue: filters.dataSourceId,
@@ -211,6 +339,13 @@ const DataCatalog: React.FC = () => {
           sampleAssetIdType: typeof assets[0]?.dataSourceId,
         });
       }
+    }
+
+    // Database filter (multiple databases)
+    if (filters.databases && filters.databases.length > 0) {
+      const targetDatabases = filters.databases.map(normalizeString);
+      filtered = filtered.filter(a => targetDatabases.includes(normalizeString(a.databaseName)));
+      console.log('  After databases filter:', filtered.length);
     }
 
     // Schema filter
@@ -235,48 +370,35 @@ const DataCatalog: React.FC = () => {
     return Boolean(
       (filters.search && filters.search.trim()) ||
       filters.dataSourceId ||
+      (filters.databases && filters.databases.length > 0) ||
       filters.schema ||
-      (filters.type && filters.type !== 'all') ||
-      filters.showSystemTables
+      (filters.type && filters.type !== 'all')
     );
   }, [filters]);
 
-  // Calculate statistics from pagination data (which already excludes system tables unless requested)
+  // Calculate statistics - use catalogSummary from backend for accurate counts
   const stats = useMemo(() => {
-    // The pagination.total already reflects the current filter state including system tables filter
-    // So we should use it directly without additional filtering
-    const totalAssets = pagination.total || 0;
+    // If we have catalogSummary from the backend, use it directly (it's already filtered)
+    if (catalogSummary) {
+      return {
+        totalAssets: catalogSummary.totalAssets || 0,
+        totalSources: catalogSummary.totalSources || 0,
+        totalSchemas: catalogSummary.totalSchemas || 0,
+        totalRows: catalogSummary.totalRows || 0,
+        avgQuality: 0,
+        byType: {
+          tables: catalogSummary.byType?.table || 0,
+          views: catalogSummary.byType?.view || 0,
+        },
+      };
+    }
 
-    // For type counts, use the summary if available, otherwise estimate from current page
+    // Fallback to estimation from current page if catalogSummary not available
+    const totalAssets = pagination.total || 0;
     let tableCount = 0;
     let viewCount = 0;
 
     if (summary && summary.byType) {
-      // Use summary counts if available (but these might include system tables)
-      // Need to adjust based on current filter
-      if (!filters.showSystemTables) {
-        // Summary includes all, but we're filtering out system tables
-        // Can't accurately separate, so fall back to estimation
-        const currentTables = assets.filter(a => normalizeType(a.type) === 'table').length;
-        const currentViews = assets.filter(a => normalizeType(a.type) === 'view').length;
-        const currentTotal = assets.length;
-
-        if (currentTotal > 0) {
-          const ratio = totalAssets / currentTotal;
-          tableCount = Math.round(currentTables * ratio);
-          viewCount = Math.round(currentViews * ratio);
-        } else {
-          // If no assets on current page, use total as all tables (rough estimate)
-          tableCount = totalAssets;
-          viewCount = 0;
-        }
-      } else {
-        // Showing system tables, use summary directly
-        tableCount = summary.byType.table || 0;
-        viewCount = summary.byType.view || 0;
-      }
-    } else {
-      // No summary, estimate from current page
       const currentTables = assets.filter(a => normalizeType(a.type) === 'table').length;
       const currentViews = assets.filter(a => normalizeType(a.type) === 'view').length;
       const currentTotal = assets.length;
@@ -286,36 +408,58 @@ const DataCatalog: React.FC = () => {
         tableCount = Math.round(currentTables * ratio);
         viewCount = Math.round(currentViews * ratio);
       } else {
-        // Default to showing all as tables if we have no data
+        tableCount = totalAssets;
+        viewCount = 0;
+      }
+    } else {
+      const currentTables = assets.filter(a => normalizeType(a.type) === 'table').length;
+      const currentViews = assets.filter(a => normalizeType(a.type) === 'view').length;
+      const currentTotal = assets.length;
+
+      if (currentTotal > 0) {
+        const ratio = totalAssets / currentTotal;
+        tableCount = Math.round(currentTables * ratio);
+        viewCount = Math.round(currentViews * ratio);
+      } else {
         tableCount = totalAssets;
         viewCount = 0;
       }
     }
 
-    // Calculate total rows from current page and extrapolate
     const currentPageRows = assets.reduce((sum, a) => sum + (a.rowCount || 0), 0);
     const estimatedTotalRows = assets.length > 0
       ? Math.round((currentPageRows / assets.length) * totalAssets)
       : 0;
 
+    const uniqueDataSources = new Set(assets.map(a => a.dataSourceId));
+    const totalSources = Math.max(uniqueDataSources.size, dataSources.length);
+
+    const uniqueSchemas = new Set(assets.map(a => a.schema));
+    const totalSchemas = uniqueSchemas.size;
+
     return {
       totalAssets,
-      totalSources: dataSources.length,
-      totalSchemas: schemas.length,
+      totalSources,
+      totalSchemas,
       totalRows: estimatedTotalRows,
-      avgQuality: 0, // Would need all assets to calculate accurately
+      avgQuality: 0,
       byType: {
         tables: tableCount,
         views: viewCount,
       },
     };
-  }, [assets, pagination, summary, dataSources.length, schemas.length, filters.showSystemTables]);
+  }, [catalogSummary, assets, pagination, summary, dataSources.length]);
 
   const getDataSourceInfo = (dataSourceId: string) => {
     const ds = dataSources.find(d => compareIds(d.id, dataSourceId));
     if (!ds) {
-      console.warn('⚠️ Data source not found:', dataSourceId);
-      return { name: 'Unknown', database: '', type: '' };
+      // Only warn once per missing data source to avoid console spam
+      if (!window._missingDataSources) window._missingDataSources = new Set();
+      if (!window._missingDataSources.has(dataSourceId)) {
+        console.warn('⚠️ Data source not found:', dataSourceId, '(possibly deleted or not loaded yet)');
+        window._missingDataSources.add(dataSourceId);
+      }
+      return { name: 'Unknown Source', database: '', type: 'unknown' };
     }
 
     const config = (ds as any).connectionConfig || {};
@@ -337,10 +481,18 @@ const DataCatalog: React.FC = () => {
     try {
       const response = await fetch(`/api/catalog/assets/${assetId}/preview?limit=20`);
       const result = await response.json();
+
+      // Check if there's an error in the response
+      if (!response.ok || result.error) {
+        const errorMsg = result.error || result.message || `Server error: ${response.status}`;
+        setPreviewModal({ open: true, data: { error: errorMsg }, loading: false });
+        return;
+      }
+
       setPreviewModal({ open: true, data: result.data || result, loading: false });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Preview failed:', error);
-      setPreviewModal({ open: true, data: { error: 'Failed to load preview' }, loading: false });
+      setPreviewModal({ open: true, data: { error: error.message || 'Failed to load preview' }, loading: false });
     }
   };
 
@@ -356,14 +508,166 @@ const DataCatalog: React.FC = () => {
     }
   };
 
+  const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
+    const notification = document.createElement('div');
+    const bgColor = type === 'success' ? 'bg-green-500' : 'bg-red-500';
+    notification.className = `fixed top-20 right-6 ${bgColor} text-white px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    setTimeout(() => {
+      notification.style.opacity = '0';
+      notification.style.transition = 'opacity 0.3s';
+      setTimeout(() => notification.remove(), 300);
+    }, 2000);
+  };
+
   const handleBookmark = async (assetId: string) => {
     try {
       const response = await fetch(`/api/catalog/assets/${assetId}/bookmark`, { method: 'POST' });
       const result = await response.json();
-      console.log('Bookmark toggled:', result);
+
+      if (!response.ok || result.error) {
+        const errorMsg = result.error || result.message || 'Failed to toggle bookmark';
+        console.error('Bookmark failed:', errorMsg);
+        alert(`Bookmark action failed: ${errorMsg}`);
+        return;
+      }
+
+      const isBookmarked = result.bookmarked || result.data?.bookmarked || false;
+      console.log('Bookmark toggled:', result, 'isBookmarked:', isBookmarked);
+
+      // Update the selected asset if it's the one being bookmarked
+      if (selectedAsset && selectedAsset.id === assetId) {
+        setSelectedAsset({ ...selectedAsset, isBookmarked });
+      }
+
+      // Show success feedback
+      const message = isBookmarked ? '⭐ Bookmarked!' : 'Bookmark removed';
+      showNotification(message, 'success');
       refresh();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Bookmark failed:', error);
+      alert(`Bookmark action failed: ${error.message || 'Network error'}`);
+    }
+  };
+
+  const handleRate = async (assetId: string, rating: number) => {
+    try {
+      const response = await fetch(`/api/catalog/assets/${assetId}/rate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || result.error) {
+        console.error('Rating failed:', result.error || result.message);
+        showNotification('Failed to save rating', 'error');
+        return;
+      }
+
+      const avgRating = result.data?.avgRating || rating;
+      console.log('✅ Rating saved:', { assetId, rating, avgRating, result });
+
+      // Update the selected asset if it's the one being rated
+      if (selectedAsset && selectedAsset.id === assetId) {
+        setSelectedAsset({
+          ...selectedAsset,
+          ratingAvg: avgRating,
+          rating_avg: avgRating,
+          rating: avgRating
+        });
+      }
+
+      showNotification(`Rated ${rating} stars!`, 'success');
+
+      // Refresh the asset list to show updated rating
+      refresh();
+    } catch (error: any) {
+      console.error('Rating failed:', error);
+      showNotification('Failed to save rating', 'error');
+    }
+  };
+
+  const handleShare = async (assetId: string) => {
+    try {
+      const asset = filteredAssets.find(a => a.id === assetId);
+      if (!asset) return;
+
+      const shareUrl = `${window.location.origin}/data-catalog?asset=${assetId}`;
+      const shareText = `Check out this ${asset.type}: ${asset.name || asset.table}`;
+
+      if (navigator.share) {
+        await navigator.share({
+          title: asset.name || asset.table,
+          text: shareText,
+          url: shareUrl
+        });
+        showNotification('Shared successfully!', 'success');
+      } else {
+        // Fallback: copy to clipboard
+        await navigator.clipboard.writeText(shareUrl);
+        console.log('📋 Link copied:', shareUrl);
+        showNotification('Link copied! You can now paste it anywhere.', 'success');
+      }
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        console.error('Share failed:', error);
+        showNotification('Failed to share', 'error');
+      }
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      // Build query params with current filters
+      const params = new URLSearchParams();
+      if (filters.search) params.append('search', filters.search);
+      if (filters.type && filters.type !== 'all') params.append('type', filters.type);
+      if (filters.dataSourceId) params.append('datasourceId', filters.dataSourceId);
+      if (filters.databases && filters.databases.length > 0) {
+        params.append('databases', filters.databases.join(','));
+      }
+      if (filters.schema) params.append('schema', filters.schema);
+      params.append('objectType', 'user'); // Only export user objects
+
+      // Trigger download
+      const url = `/api/catalog/assets/export?${params.toString()}`;
+      window.open(url, '_blank');
+
+      showNotification('Export started! Download will begin shortly.', 'success');
+    } catch (error: any) {
+      console.error('Export failed:', error);
+      showNotification('Failed to export assets', 'error');
+    }
+  };
+
+  const handleProfile = async (assetId: string) => {
+    try {
+      showNotification('Starting profile scan...', 'success');
+
+      const response = await fetch(`/api/catalog/assets/${assetId}/profile`, {
+        method: 'POST'
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || result.error) {
+        console.error('Profile failed:', result.error || result.message);
+        showNotification('Failed to start profile scan', 'error');
+        return;
+      }
+
+      showNotification('✓ Profile scan queued! This may take a few moments...', 'success');
+
+      // Refresh after a delay to show updated data
+      setTimeout(() => {
+        refresh();
+      }, 5000);
+    } catch (error: any) {
+      console.error('Profile failed:', error);
+      showNotification('Failed to start profile scan', 'error');
     }
   };
 
@@ -452,7 +756,7 @@ const DataCatalog: React.FC = () => {
                 ) : (
                   <>
                     Explore <strong className="text-gray-900">{stats.totalAssets.toLocaleString()}</strong> assets
-                    across <strong className="text-gray-900">{dataSources.length}</strong> data sources
+                    across <strong className="text-gray-900">{stats.totalSources}</strong> data sources
                   </>
                 )}
               </p>
@@ -472,7 +776,7 @@ const DataCatalog: React.FC = () => {
                 <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
               </Button>
 
-              <Button variant="outline" size="sm" onClick={() => console.log('Export')}>
+              <Button variant="outline" size="sm" onClick={handleExport}>
                 <Download className="h-4 w-4" />
                 Export
               </Button>
@@ -496,13 +800,37 @@ const DataCatalog: React.FC = () => {
           </div>
 
           {/* Stats */}
-          <div className="grid grid-cols-6 gap-4 mb-6">
-            <StatCard label="Total Assets" value={stats.totalAssets.toLocaleString()} icon={<Database className="h-5 w-5 text-blue-600" />} />
-            <StatCard label="Tables" value={stats.byType.tables.toLocaleString()} icon={<TableIcon className="h-5 w-5 text-purple-600" />} />
-            <StatCard label="Total Rows" value={formatNumber(stats.totalRows)} icon={<TrendingUp className="h-5 w-5 text-green-600" />} />
-            <StatCard label="Data Sources" value={stats.totalSources.toString()} icon={<Database className="h-5 w-5 text-orange-600" />} />
-            <StatCard label="Schemas" value={stats.totalSchemas.toString()} icon={<BookOpen className="h-5 w-5 text-indigo-600" />} />
-            <StatCard label="Avg Quality" value={`${stats.avgQuality}%`} icon={<Zap className="h-5 w-5 text-yellow-600" />} quality={stats.avgQuality} />
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+            <StatCard
+              label="Total Assets"
+              value={stats.totalAssets.toLocaleString()}
+              icon={<Database className="h-5 w-5" />}
+              gradient="from-blue-500 to-blue-600"
+            />
+            <StatCard
+              label="Tables"
+              value={stats.byType.tables.toLocaleString()}
+              icon={<TableIcon className="h-5 w-5" />}
+              gradient="from-purple-500 to-purple-600"
+            />
+            <StatCard
+              label="Views"
+              value={stats.byType.views.toLocaleString()}
+              icon={<Eye className="h-5 w-5" />}
+              gradient="from-green-500 to-green-600"
+            />
+            <StatCard
+              label="Total Rows"
+              value={formatNumber(stats.totalRows)}
+              icon={<TrendingUp className="h-5 w-5" />}
+              gradient="from-cyan-500 to-cyan-600"
+            />
+            <StatCard
+              label="Data Sources"
+              value={stats.totalSources.toString()}
+              icon={<Database className="h-5 w-5" />}
+              gradient="from-orange-500 to-orange-600"
+            />
           </div>
 
           {/* Search & Filters */}
@@ -541,14 +869,20 @@ const DataCatalog: React.FC = () => {
                 onChange={(e) => {
                   const newValue = e.target.value || undefined;
                   console.log('📝 Data source changed:', newValue);
-                  setFilters(prev => ({ ...prev, dataSourceId: newValue, schema: undefined }));
-                  // Reset to first page when changing data source
-                  updateFilters({ page: 1, dataSourceId: newValue });
+                  // Reset databases and schema filters when changing server
+                  setFilters(prev => ({ ...prev, dataSourceId: newValue, databases: [], schema: undefined }));
+                  // Reset to first page and clear database/schema filters immediately
+                  updateFilters({
+                    page: 1,
+                    dataSourceId: newValue,
+                    databases: undefined,
+                    schema: undefined
+                  });
                 }}
                 className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 min-w-[200px]"
               >
-                <option value="">All Sources ({dataSources.length})</option>
-                {dataSources.map(ds => {
+                <option value="">All Servers ({uniqueDataSources.length})</option>
+                {uniqueDataSources.map(ds => {
                   const info = getDataSourceInfo(ds.id);
                   return (
                     <option key={ds.id} value={ds.id}>
@@ -557,6 +891,128 @@ const DataCatalog: React.FC = () => {
                   );
                 })}
               </select>
+
+              <div
+                className="relative"
+                onBlur={(e) => {
+                  // Close picker when clicking outside
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                    setShowDatabasePicker(false);
+                  }
+                }}
+              >
+                <button
+                  onClick={() => setShowDatabasePicker(!showDatabasePicker)}
+                  className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 min-w-[240px] bg-white flex items-center justify-between"
+                  disabled={!filters.dataSourceId && databasesByDataSource.length > 1}
+                  title={!filters.dataSourceId && databasesByDataSource.length > 1 ? "Select a server first to filter by database" : ""}
+                >
+                  <span>
+                    {(() => {
+                      const selectedCount = filters.databases?.length || 0;
+                      if (selectedCount === 0) {
+                        if (filters.dataSourceId) {
+                          const selectedDs = databasesByDataSource.find(ds => ds.dataSourceId === filters.dataSourceId);
+                          const count = selectedDs?.databases.filter(db => !db.isSystem).length || 0;
+                          return `All Databases${count > 0 ? ` (${count})` : ''}`;
+                        }
+                        const totalCount = databasesByDataSource.reduce((sum, ds) => sum + ds.databases.filter(db => !db.isSystem).length, 0);
+                        return `All Databases (${totalCount})`;
+                      }
+                      return `${selectedCount} Database${selectedCount !== 1 ? 's' : ''} Selected`;
+                    })()}
+                  </span>
+                  <ChevronDown className={`h-4 w-4 transition-transform ${showDatabasePicker ? 'rotate-180' : ''}`} />
+                </button>
+
+                {showDatabasePicker && (
+                  <div className="absolute top-full left-0 mt-1 w-full bg-white border border-gray-300 rounded-lg shadow-lg z-50 max-h-80 overflow-y-auto">
+                    <div className="p-2">
+                      <div className="flex items-center justify-between px-2 py-1 mb-2 border-b">
+                        <span className="text-xs font-semibold text-gray-700">Select Databases</span>
+                        {filters.databases && filters.databases.length > 0 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setFilters(prev => ({ ...prev, databases: [] }));
+                              updateFilters({ page: 1, databases: undefined });
+                            }}
+                            className="text-xs text-blue-600 hover:text-blue-700"
+                          >
+                            Clear All
+                          </button>
+                        )}
+                      </div>
+                      {filters.dataSourceId ? (
+                        // Show only non-system databases for selected data source
+                        databasesByDataSource
+                          .filter(ds => ds.dataSourceId === filters.dataSourceId)
+                          .flatMap(ds =>
+                            ds.databases
+                              .filter(database => !database.isSystem)
+                              .map(database => (
+                                <label
+                                  key={database.name}
+                                  className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 rounded cursor-pointer"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={filters.databases?.includes(database.name) || false}
+                                    onChange={(e) => {
+                                      const isChecked = e.target.checked;
+                                      const newDatabases = isChecked
+                                        ? [...(filters.databases || []), database.name]
+                                        : (filters.databases || []).filter(d => d !== database.name);
+                                      setFilters(prev => ({ ...prev, databases: newDatabases }));
+                                      updateFilters({ page: 1, databases: newDatabases.length > 0 ? newDatabases.join(',') : undefined });
+                                    }}
+                                    className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                                  />
+                                  <span className="text-sm text-gray-700">{database.name}</span>
+                                  {database.isSynced && (
+                                    <span className="ml-auto text-xs text-green-600">✓ Synced</span>
+                                  )}
+                                </label>
+                              ))
+                          )
+                      ) : (
+                        // Show grouped by data source when no source is selected
+                        databasesByDataSource.map(ds => (
+                          <div key={ds.dataSourceId}>
+                            <div className="px-2 py-1 text-xs font-semibold text-gray-500 uppercase">{ds.dataSourceName}</div>
+                            {ds.databases
+                              .filter(database => !database.isSystem)
+                              .map(database => (
+                                <label
+                                  key={`${ds.dataSourceId}-${database.name}`}
+                                  className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 rounded cursor-pointer ml-2"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={filters.databases?.includes(database.name) || false}
+                                    onChange={(e) => {
+                                      const isChecked = e.target.checked;
+                                      const newDatabases = isChecked
+                                        ? [...(filters.databases || []), database.name]
+                                        : (filters.databases || []).filter(d => d !== database.name);
+                                      setFilters(prev => ({ ...prev, databases: newDatabases }));
+                                      updateFilters({ page: 1, databases: newDatabases.length > 0 ? newDatabases.join(',') : undefined });
+                                    }}
+                                    className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                                  />
+                                  <span className="text-sm text-gray-700">{database.name}</span>
+                                  {database.isSynced && (
+                                    <span className="ml-auto text-xs text-green-600">✓ Synced</span>
+                                  )}
+                                </label>
+                              ))}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <select
                 value={filters.type}
@@ -568,81 +1024,27 @@ const DataCatalog: React.FC = () => {
                 }}
                 className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
               >
-                <option value="all">All Types</option>
+                <option value="all">All Types ({stats.byType.tables + stats.byType.views})</option>
                 <option value="table">Tables ({stats.byType.tables})</option>
                 <option value="view">Views ({stats.byType.views})</option>
               </select>
-
-              <button
-                onClick={() => setShowFilters(!showFilters)}
-                className={`flex items-center gap-2 px-4 py-3 border rounded-lg text-sm font-medium ${
-                  showFilters ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                <Filter className="h-4 w-4" />
-                Filters
-                <ChevronDown className={`h-4 w-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
-              </button>
             </div>
 
-            {showFilters && (
-              <div className="bg-gray-50 rounded-lg border border-gray-200 p-4">
-                <div className="grid grid-cols-4 gap-4">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-2">Schema</label>
-                    <select
-                      value={filters.schema || ''}
-                      onChange={(e) => {
-                        const newSchema = e.target.value || undefined;
-                        setFilters(prev => ({ ...prev, schema: newSchema }));
-                        // Reset to first page when changing schema
-                        updateFilters({ page: 1, schema: newSchema });
-                      }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                    >
-                      <option value="">All Schemas ({schemas.length})</option>
-                      {schemas.map(schema => (
-                        <option key={schema} value={schema}>
-                          {schema}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="flex items-end col-span-3">
-                    <label className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={filters.showSystemTables}
-                        onChange={(e) => {
-                          const showSystem = e.target.checked;
-                          setFilters(prev => ({ ...prev, showSystemTables: showSystem }));
-                          // Reset to first page when toggling system tables
-                          updateFilters({ page: 1, objectType: showSystem ? undefined : 'user' });
-                        }}
-                        className="h-4 w-4 rounded border-gray-300 text-blue-600"
-                      />
-                      <span className="text-sm text-gray-700">Show system tables</span>
-                    </label>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
-                  <span className="text-sm text-gray-600">
-                    {filteredAssets.length} result{filteredAssets.length !== 1 ? 's' : ''}
-                    {hasActiveFilters && ' (filtered)'}
-                  </span>
-                  <button
-                    onClick={() => {
-                      setFilters({ search: '', type: 'all', showSystemTables: false, dataSourceId: undefined, schema: undefined });
-                      // Reset to first page when clearing all filters
-                      updateFilters({ page: 1, search: undefined, dataSourceId: undefined, schema: undefined, type: undefined, objectType: 'user' });
-                    }}
-                    className="text-sm text-blue-600 hover:text-blue-700 font-medium"
-                  >
-                    Clear all filters
-                  </button>
-                </div>
+            {hasActiveFilters && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-600">
+                  {filteredAssets.length} result{filteredAssets.length !== 1 ? 's' : ''} (filtered)
+                </span>
+                <button
+                  onClick={() => {
+                    setFilters({ search: '', type: 'all', dataSourceId: undefined, databases: [], schema: undefined });
+                    // Reset to first page when clearing all filters
+                    updateFilters({ page: 1, search: undefined, dataSourceId: undefined, databases: undefined, schema: undefined, type: undefined, objectType: 'user' });
+                  }}
+                  className="text-blue-600 hover:text-blue-700 font-medium"
+                >
+                  Clear all filters
+                </button>
               </div>
             )}
           </div>
@@ -657,8 +1059,8 @@ const DataCatalog: React.FC = () => {
           <EmptyState
             hasFilters={hasActiveFilters}
             onReset={() => {
-              setFilters({ search: '', type: 'all', showSystemTables: false, dataSourceId: undefined, schema: undefined });
-              updateFilters({ page: 1, search: undefined, dataSourceId: undefined, schema: undefined, type: undefined, objectType: 'user' });
+              setFilters({ search: '', type: 'all', dataSourceId: undefined, databases: [], schema: undefined });
+              updateFilters({ page: 1, search: undefined, dataSourceId: undefined, databases: undefined, schema: undefined, type: undefined, objectType: 'user' });
             }}
           />
         ) : (
@@ -674,6 +1076,9 @@ const DataCatalog: React.FC = () => {
                       onSelect={setSelectedAsset}
                       onToggleSelect={toggleAssetSelection}
                       getDataSourceInfo={getDataSourceInfo}
+                      onBookmark={handleBookmark}
+                      onRate={handleRate}
+                      onShare={handleShare}
                     />
                   ))}
                 </div>
@@ -875,21 +1280,40 @@ const Pagination: React.FC<{
   );
 };
 
-const StatCard: React.FC<{ label: string; value: string; icon: React.ReactNode; quality?: number }> = ({ label, value, icon, quality }) => (
-  <div className="bg-white rounded-lg p-4 border border-gray-200">
-    <div className="flex items-center justify-between mb-2">
-      <span className="text-xs font-medium text-gray-600 uppercase tracking-wider">{label}</span>
-      <div className="p-1.5 bg-gray-50 rounded-lg">{icon}</div>
-    </div>
-    <div className="text-2xl font-bold text-gray-900">{value}</div>
-    {quality !== undefined && (
-      <div className="mt-2 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full ${quality >= 80 ? 'bg-green-500' : quality >= 60 ? 'bg-yellow-500' : 'bg-red-500'}`}
-          style={{ width: `${quality}%` }}
-        />
+const StatCard: React.FC<{
+  label: string;
+  value: string;
+  icon: React.ReactNode;
+  quality?: number;
+  gradient?: string;
+}> = ({ label, value, icon, quality, gradient = 'from-blue-500 to-blue-600' }) => (
+  <div className="group relative bg-white rounded-xl p-5 border border-gray-200 hover:border-gray-300 transition-all duration-200 hover:shadow-lg overflow-hidden">
+    {/* Gradient background on hover */}
+    <div className={`absolute inset-0 bg-gradient-to-br ${gradient} opacity-0 group-hover:opacity-5 transition-opacity duration-200`} />
+
+    <div className="relative">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</span>
+        <div className={`p-2.5 bg-gradient-to-br ${gradient} rounded-xl shadow-sm group-hover:scale-110 transition-transform duration-200`}>
+          <div className="text-white">
+            {icon}
+          </div>
+        </div>
       </div>
-    )}
+      <div className="text-3xl font-bold text-gray-900 mb-1">{value}</div>
+      {quality !== undefined && (
+        <div className="mt-3 h-2 bg-gray-100 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${
+              quality >= 80 ? 'bg-gradient-to-r from-green-400 to-green-600' :
+              quality >= 60 ? 'bg-gradient-to-r from-yellow-400 to-yellow-600' :
+              'bg-gradient-to-r from-red-400 to-red-600'
+            }`}
+            style={{ width: `${quality}%` }}
+          />
+        </div>
+      )}
+    </div>
   </div>
 );
 
@@ -899,10 +1323,14 @@ const AssetCard: React.FC<{
   onSelect: (asset: any) => void;
   onToggleSelect: (id: string) => void;
   getDataSourceInfo: (id: string) => any;
-}> = ({ asset, selected, onSelect, onToggleSelect, getDataSourceInfo }) => {
+  onBookmark?: (id: string) => void;
+  onRate?: (id: string, rating: number) => void;
+  onShare?: (id: string) => void;
+}> = ({ asset, selected, onSelect, onToggleSelect, getDataSourceInfo, onBookmark, onRate, onShare }) => {
   const trustScore = asset.trust_score || asset.trustScore || asset.quality_score || asset.qualityScore || 0;
-  const rating = asset.rating_avg || asset.rating || 0;
+  const rating = asset.ratingAvg || asset.rating_avg || asset.rating || 0;
   const dsInfo = getDataSourceInfo(asset.dataSourceId);
+  const isBookmarked = asset.isBookmarked || false;
 
   return (
     <div
@@ -923,11 +1351,11 @@ const AssetCard: React.FC<{
       </div>
 
       <div onClick={() => onSelect(asset)} className="p-4 pl-10">
-        <div className="flex items-start justify-between mb-3">
-          <div className="flex-1 min-w-0 mr-2">
+        <div className="flex items-start justify-between mb-3 gap-2">
+          <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1.5">
               <span
-                className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${
                   asset.type === 'table' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
                 }`}
               >
@@ -936,20 +1364,24 @@ const AssetCard: React.FC<{
               </span>
             </div>
 
-            <h3 className="text-base font-bold text-gray-900 truncate group-hover:text-blue-600 mb-1.5">{asset.name || asset.table}</h3>
+            <h3 className="text-base font-bold text-gray-900 truncate group-hover:text-blue-600 mb-1.5" title={asset.name || asset.table}>
+              {asset.name || asset.table}
+            </h3>
 
-            <div className="flex items-center gap-1.5 text-xs text-gray-600">
+            <div className="flex items-center gap-1.5 text-xs text-gray-600 min-w-0">
               <Database className="h-3 w-3 flex-shrink-0 text-gray-400" />
-              <div className="flex items-center gap-1 truncate">
-                <span className="font-medium">{dsInfo.name}</span>
-                {dsInfo.database && (
+              <div className="flex items-center gap-1 min-w-0 overflow-hidden">
+                <span className="font-medium truncate max-w-[80px]" title={dsInfo.name}>{dsInfo.name}</span>
+                {(asset.databaseName || dsInfo.database) && (
                   <>
-                    <span className="text-gray-400">/</span>
-                    <span className="font-mono text-blue-600">{dsInfo.database}</span>
+                    <span className="text-gray-400 flex-shrink-0">/</span>
+                    <span className="font-mono text-blue-600 truncate max-w-[60px]" title={asset.databaseName || dsInfo.database}>
+                      {asset.databaseName || dsInfo.database}
+                    </span>
                   </>
                 )}
-                <span className="text-gray-400">·</span>
-                <span className="font-mono text-purple-600">{asset.schema}</span>
+                <span className="text-gray-400 flex-shrink-0">·</span>
+                <span className="font-mono text-purple-600 truncate" title={asset.schema}>{asset.schema}</span>
               </div>
             </div>
           </div>
@@ -996,22 +1428,47 @@ const AssetCard: React.FC<{
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between pt-4 border-t border-gray-100">
-          <div className="flex items-center gap-3">
-            <RatingStars rating={rating} count={0} size="sm" showCount={false} />
-            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button onClick={(e) => e.stopPropagation()} className="p-1.5 hover:bg-yellow-100 rounded-md" title="Favorite">
-                <Star className="h-4 w-4 text-yellow-600" />
+        <div className="flex items-center justify-between pt-4 border-t border-gray-100 gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
+            <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+              <RatingStars
+                rating={rating}
+                count={0}
+                size="sm"
+                showCount={false}
+                interactive={true}
+                onChange={(newRating) => {
+                  if (onRate) onRate(asset.id, newRating);
+                }}
+              />
+            </div>
+            <div className={`flex items-center gap-1 transition-opacity flex-shrink-0 ${isBookmarked ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (onBookmark) onBookmark(asset.id);
+                }}
+                className={`p-1.5 hover:bg-yellow-100 rounded-md transition-colors ${isBookmarked ? 'bg-yellow-50' : ''}`}
+                title={isBookmarked ? "Bookmarked" : "Bookmark"}
+              >
+                <Star className={`h-4 w-4 ${isBookmarked ? 'fill-yellow-400 text-yellow-600' : 'text-yellow-600'}`} />
               </button>
-              <button onClick={(e) => e.stopPropagation()} className="p-1.5 hover:bg-blue-100 rounded-md" title="Share">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (onShare) onShare(asset.id);
+                }}
+                className="p-1.5 hover:bg-blue-100 rounded-md transition-colors"
+                title="Share"
+              >
                 <Share2 className="h-4 w-4 text-blue-600" />
               </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 text-xs text-gray-500">
+          <div className="flex items-center gap-1.5 text-xs text-gray-500 flex-shrink-0">
             <Clock className="h-3.5 w-3.5" />
-            <span>{formatDate(asset.updatedAt)}</span>
+            <span className="whitespace-nowrap">{formatDate(asset.updatedAt)}</span>
           </div>
         </div>
       </div>
@@ -1095,8 +1552,12 @@ const AssetDetailsPanel: React.FC<{
               <MessageSquare className="h-4 w-4 mr-2" />
               Query
             </Button>
-            <Button variant="outline" onClick={() => onBookmark(asset.id)}>
-              <Star className="h-4 w-4" />
+            <Button
+              variant="outline"
+              onClick={() => onBookmark(asset.id)}
+              className={asset.isBookmarked ? 'bg-yellow-50 border-yellow-300' : ''}
+            >
+              <Star className={`h-4 w-4 ${asset.isBookmarked ? 'fill-yellow-400 text-yellow-400' : 'text-gray-400'}`} />
             </Button>
           </div>
         </div>
@@ -1114,7 +1575,12 @@ const AssetDetailsPanel: React.FC<{
             <div className="grid grid-cols-3 gap-4">
               <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
                 <div className="text-sm text-blue-700 mb-1">Rows</div>
-                <div className="text-xl font-bold text-blue-900">{asset.rowCount ? formatNumber(asset.rowCount) : '—'}</div>
+                <div className="text-xl font-bold text-blue-900">
+                  {asset.rowCount !== null && asset.rowCount !== undefined ? formatNumber(asset.rowCount) : '—'}
+                </div>
+                {(asset.rowCount === null || asset.rowCount === undefined) && (
+                  <div className="text-xs text-blue-600 mt-1">Not scanned</div>
+                )}
               </div>
               <div className="bg-purple-50 rounded-lg p-4 border border-purple-200">
                 <div className="text-sm text-purple-700 mb-1">Columns</div>
@@ -1151,7 +1617,7 @@ const AssetDetailsPanel: React.FC<{
             <h3 className="text-lg font-semibold mb-4">Metadata</h3>
             <div className="bg-white rounded-lg border divide-y">
               <MetadataRow label="Data Source" value={dsInfo.name} />
-              <MetadataRow label="Database" value={dsInfo.database || '—'} />
+              <MetadataRow label="Database" value={asset.databaseName || dsInfo.database || '—'} />
               <MetadataRow label="Schema" value={asset.schema} />
               <MetadataRow label="Created" value={new Date(asset.createdAt).toLocaleString()} icon={<Calendar className="h-4 w-4" />} />
               <MetadataRow label="Updated" value={new Date(asset.updatedAt).toLocaleString()} icon={<Clock className="h-4 w-4" />} />

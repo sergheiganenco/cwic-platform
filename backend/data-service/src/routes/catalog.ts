@@ -21,8 +21,10 @@ type DSRow = {
   id: string;
   tenant_id: number | null;
   type: 'postgresql' | 'mssql';
+  name?: string;
   config?: any;
   connection_config?: any;
+  cfg?: any;
 };
 
 async function getDataSourceById(
@@ -54,10 +56,41 @@ async function getDataSourceById(
 
 /* ------------------------- Ingest (Harvest) ------------------------ */
 
-async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) {
-  // Some server-level sources may not target a specific database, or may point
-  // to a DB that doesn't exist on this server. In those cases, connect to the
-  // default 'postgres' database so that sync can proceed instead of failing.
+/**
+ * Get system databases for a given database type
+ */
+function getSystemDatabasesForType(type: string): string[] {
+  switch (type) {
+    case 'postgresql':
+      return ['postgres', 'template0', 'template1'];
+    case 'mssql':
+    case 'sqlserver':
+      return ['master', 'tempdb', 'model', 'msdb'];
+    case 'mysql':
+    case 'mariadb':
+      return ['mysql', 'information_schema', 'performance_schema', 'sys'];
+    case 'oracle':
+      return ['SYS', 'SYSTEM', 'SYSAUX', 'TEMP', 'USERS'];
+    case 'snowflake':
+      return ['SNOWFLAKE', 'INFORMATION_SCHEMA'];
+    case 'redshift':
+      return ['dev', 'padb_harvest', 'template0', 'template1'];
+    case 'bigquery':
+      return ['INFORMATION_SCHEMA'];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Sync a single PostgreSQL database
+ */
+async function ingestPostgresSingleDatabase(
+  tenantId: number,
+  dataSourceId: string,
+  cfg: any,
+  targetDatabase: string
+): Promise<{ assets: number; columns: number; database: string }> {
   const buildClient = (database: string | undefined) => new PgClient({
     host: cfg.host,
     port: Number(cfg.port ?? 5432),
@@ -67,20 +100,14 @@ async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) 
     ssl: cfg.ssl === false || cfg.ssl?.mode === 'disable' ? undefined : cfg.ssl,
   });
 
-  let src = buildClient(cfg.database);
+  let src = buildClient(targetDatabase);
   try {
     await src.connect();
   } catch (err: any) {
     const msg = String(err?.message || err);
-    // Postgres invalid catalog name (3D000) or explicit 'does not exist'
+    // Database doesn't exist or can't connect
     if (/does not exist/i.test(msg) || /3D000/.test(msg)) {
-      try {
-        // Retry on 'postgres' database
-        src = buildClient('postgres');
-        await src.connect();
-      } catch (e) {
-        throw err; // preserve original error if retry fails
-      }
+      throw new Error(`Database "${targetDatabase}" does not exist or is not accessible`);
     } else {
       throw err;
     }
@@ -129,6 +156,10 @@ async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) 
     }
   }
 
+  // Get the actual database name from the connection
+  const dbNameResult = await src.query('SELECT current_database() AS database_name');
+  const dbName = dbNameResult.rows[0]?.database_name || targetDatabase;
+
   await src.end();
 
   let assets = 0, cols = 0;
@@ -141,12 +172,12 @@ async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) 
 
     const ar: QueryResult<{ id: string }> = await cpdb.query(
       `INSERT INTO catalog_assets
-         (tenant_id, datasource_id, asset_type, schema_name, table_name, row_count, column_count, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+         (tenant_id, datasource_id, asset_type, schema_name, table_name, row_count, column_count, database_name, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
        ON CONFLICT (tenant_id, datasource_id, asset_type, schema_name, table_name)
-       DO UPDATE SET row_count = EXCLUDED.row_count, column_count = EXCLUDED.column_count, updated_at = now()
+       DO UPDATE SET row_count = EXCLUDED.row_count, column_count = EXCLUDED.column_count, database_name = EXCLUDED.database_name, updated_at = now()
        RETURNING id`,
-      [tenantId, dataSourceId, assetType, t.table_schema, t.table_name, rowCount, columnCount]
+      [tenantId, dataSourceId, assetType, t.table_schema, t.table_name, rowCount, columnCount, dbName]
     );
     const assetId = ar.rows[0].id; assets++;
 
@@ -185,17 +216,126 @@ async function ingestPostgres(tenantId: number, dataSourceId: string, cfg: any) 
     END IF;
   END $$;`);
 
-  return { assets, columns: cols };
+  return { assets, columns: cols, database: dbName };
 }
 
-async function ingestMSSQL(tenantId: number, dataSourceId: string, cfg: any) {
+/**
+ * Sync all user databases on a PostgreSQL server
+ */
+async function ingestPostgresAllDatabases(
+  tenantId: number,
+  dataSourceId: string,
+  cfg: any
+): Promise<{ databases: number; totalAssets: number; totalColumns: number; details: any[] }> {
+  const buildClient = (database: string) => new PgClient({
+    host: cfg.host,
+    port: Number(cfg.port ?? 5432),
+    database,
+    user: cfg.username,
+    password: cfg.password,
+    ssl: cfg.ssl === false || cfg.ssl?.mode === 'disable' ? undefined : cfg.ssl,
+    connectionTimeoutMillis: 10000,
+  });
+
+  // Connect to postgres database to discover all databases
+  const discoverClient = buildClient('postgres');
+  try {
+    await discoverClient.connect();
+  } catch (err: any) {
+    throw new Error(`Failed to connect to server: ${err.message}`);
+  }
+
+  // Discover all user databases (exclude system databases)
+  const systemDbs = getSystemDatabasesForType('postgresql');
+  const systemDbList = systemDbs.map(db => `'${db}'`).join(',');
+
+  const { rows: databases } = await discoverClient.query(`
+    SELECT datname
+    FROM pg_database
+    WHERE datistemplate = false
+    AND datname NOT IN (${systemDbList})
+    AND datallowconn = true
+    ORDER BY datname
+  `);
+
+  await discoverClient.end();
+
+  console.log(`[PostgreSQL] Discovered ${databases.length} user databases to sync`);
+
+  // Sync each database with error handling
+  const results: any[] = [];
+  for (const db of databases) {
+    const dbName = db.datname;
+    try {
+      console.log(`[PostgreSQL] Syncing database: ${dbName}`);
+      const result = await ingestPostgresSingleDatabase(tenantId, dataSourceId, cfg, dbName);
+      results.push({
+        database: dbName,
+        success: true,
+        assets: result.assets,
+        columns: result.columns
+      });
+      console.log(`[PostgreSQL] ✓ ${dbName}: ${result.assets} assets, ${result.columns} columns`);
+    } catch (error: any) {
+      console.error(`[PostgreSQL] ✗ ${dbName}: ${error.message}`);
+      results.push({
+        database: dbName,
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const totalAssets = results.reduce((sum, r) => sum + (r.assets || 0), 0);
+  const totalColumns = results.reduce((sum, r) => sum + (r.columns || 0), 0);
+
+  console.log(`[PostgreSQL] Sync complete: ${successCount}/${databases.length} databases, ${totalAssets} total assets`);
+
+  return {
+    databases: databases.length,
+    totalAssets,
+    totalColumns,
+    details: results
+  };
+}
+
+/**
+ * Main entry point for PostgreSQL sync
+ * - If targetDatabase provided: sync only that database
+ * - If no targetDatabase: discover and sync ALL user databases
+ */
+async function ingestPostgres(
+  tenantId: number,
+  dataSourceId: string,
+  cfg: any,
+  targetDatabase?: string
+) {
+  if (targetDatabase) {
+    // Database-level sync - sync only the specified database
+    return await ingestPostgresSingleDatabase(tenantId, dataSourceId, cfg, targetDatabase);
+  } else {
+    // Server-level sync - discover and sync ALL user databases
+    return await ingestPostgresAllDatabases(tenantId, dataSourceId, cfg);
+  }
+}
+
+/**
+ * Sync a single MSSQL database
+ */
+async function ingestMSSQLSingleDatabase(
+  tenantId: number,
+  dataSourceId: string,
+  cfg: any,
+  targetDatabase: string
+): Promise<{ assets: number; columns: number; database: string }> {
   // IMPORTANT: avoid the mssql global connection (mssql.connect) because it is
   // a singleton. Closing it in one request can break others with
   // "Connection is closed." Create a dedicated pool per request instead.
   const pool = await new mssql.ConnectionPool({
     server: cfg.host || cfg.server,
     port: Number(cfg.port ?? 1433),
-    database: cfg.database,
+    database: targetDatabase,
     user: cfg.username || cfg.user,
     password: cfg.password,
     options: {
@@ -226,13 +366,40 @@ async function ingestMSSQL(tenantId: number, dataSourceId: string, cfg: any) {
       ON ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name='MS_Description'
   `)).recordset;
 
-  const counts = (await pool.request().query(`
+  // Get row counts for tables using sys.partitions (fast, uses metadata)
+  const tableCounts = (await pool.request().query(`
     SELECT s.name AS schema_name, t.name AS object_name, SUM(p.rows) AS row_count
     FROM sys.tables t
     JOIN sys.partitions p ON t.object_id=p.object_id AND p.index_id IN (0,1)
     JOIN sys.schemas s ON t.schema_id=s.schema_id
     GROUP BY s.name, t.name
   `)).recordset;
+
+  // Get row counts for views using COUNT(*) (requires query execution)
+  const viewCountPromises = tables
+    .filter((t: any) => t.asset_type === 'view')
+    .map(async (v: any) => {
+      try {
+        const countResult = await pool.request().query(`SELECT COUNT(*) AS cnt FROM [${v.schema_name}].[${v.object_name}]`);
+        return {
+          schema_name: v.schema_name,
+          object_name: v.object_name,
+          row_count: countResult.recordset[0]?.cnt || 0
+        };
+      } catch (err) {
+        console.warn(`Failed to count view ${v.schema_name}.${v.object_name}:`, err);
+        return { schema_name: v.schema_name, object_name: v.object_name, row_count: null };
+      }
+    });
+
+  const viewCounts = await Promise.all(viewCountPromises);
+
+  // Combine table and view counts
+  const counts = [...tableCounts, ...viewCounts];
+
+  // Get the actual database name
+  const dbResult = await pool.request().query('SELECT DB_NAME() AS database_name');
+  const dbName = dbResult.recordset[0]?.database_name || targetDatabase;
 
   await pool.close();
 
@@ -247,12 +414,12 @@ async function ingestMSSQL(tenantId: number, dataSourceId: string, cfg: any) {
 
     const ar: QueryResult<{ id: string }> = await cpdb.query(
       `INSERT INTO catalog_assets
-         (tenant_id, datasource_id, asset_type, schema_name, table_name, row_count, column_count, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+         (tenant_id, datasource_id, asset_type, schema_name, table_name, row_count, column_count, database_name, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
        ON CONFLICT (tenant_id, datasource_id, asset_type, schema_name, table_name)
-       DO UPDATE SET row_count = EXCLUDED.row_count, column_count = EXCLUDED.column_count, updated_at = now()
+       DO UPDATE SET row_count = EXCLUDED.row_count, column_count = EXCLUDED.column_count, database_name = EXCLUDED.database_name, updated_at = now()
        RETURNING id`,
-      [tenantId, dataSourceId, t.asset_type, t.schema_name, t.object_name, rowCount, columnCount]
+      [tenantId, dataSourceId, t.asset_type, t.schema_name, t.object_name, rowCount, columnCount, dbName]
     );
     const assetId = ar.rows[0].id; assets++;
 
@@ -290,8 +457,280 @@ async function ingestMSSQL(tenantId: number, dataSourceId: string, cfg: any) {
     END IF;
   END $$;`);
 
-  return { assets, columns: cols };
+  return { assets, columns: cols, database: dbName };
 }
+
+/**
+ * Sync all user databases on an MSSQL server
+ */
+async function ingestMSSQLAllDatabases(
+  tenantId: number,
+  dataSourceId: string,
+  cfg: any
+): Promise<{ databases: number; totalAssets: number; totalColumns: number; details: any[] }> {
+  // Connect to master database to discover all databases
+  const discoverPool = await new mssql.ConnectionPool({
+    server: cfg.host || cfg.server,
+    port: Number(cfg.port ?? 1433),
+    database: 'master',
+    user: cfg.username || cfg.user,
+    password: cfg.password,
+    options: {
+      encrypt: cfg.ssl !== false,
+      trustServerCertificate: true,
+      ...(cfg.options || {}),
+    },
+    connectionTimeout: 10000,
+  }).connect();
+
+  // Discover all user databases (exclude system databases)
+  const systemDbs = getSystemDatabasesForType('mssql');
+  const systemDbList = systemDbs.map(db => `'${db}'`).join(',');
+
+  const dbResult = await discoverPool.request().query(`
+    SELECT name
+    FROM sys.databases
+    WHERE name NOT IN (${systemDbList})
+    AND state_desc = 'ONLINE'
+    AND user_access_desc = 'MULTI_USER'
+    ORDER BY name
+  `);
+
+  await discoverPool.close();
+
+  const databases = dbResult.recordset;
+  console.log(`[MSSQL] Discovered ${databases.length} user databases to sync`);
+
+  // Sync each database with error handling
+  const results: any[] = [];
+  for (const db of databases) {
+    const dbName = db.name;
+    try {
+      console.log(`[MSSQL] Syncing database: ${dbName}`);
+      const result = await ingestMSSQLSingleDatabase(tenantId, dataSourceId, cfg, dbName);
+      results.push({
+        database: dbName,
+        success: true,
+        assets: result.assets,
+        columns: result.columns
+      });
+      console.log(`[MSSQL] ✓ ${dbName}: ${result.assets} assets, ${result.columns} columns`);
+    } catch (error: any) {
+      console.error(`[MSSQL] ✗ ${dbName}: ${error.message}`);
+      results.push({
+        database: dbName,
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const totalAssets = results.reduce((sum, r) => sum + (r.assets || 0), 0);
+  const totalColumns = results.reduce((sum, r) => sum + (r.columns || 0), 0);
+
+  console.log(`[MSSQL] Sync complete: ${successCount}/${databases.length} databases, ${totalAssets} total assets`);
+
+  return {
+    databases: databases.length,
+    totalAssets,
+    totalColumns,
+    details: results
+  };
+}
+
+/**
+ * Main entry point for MSSQL sync
+ * - If targetDatabase provided: sync only that database
+ * - If no targetDatabase: discover and sync ALL user databases
+ */
+async function ingestMSSQL(
+  tenantId: number,
+  dataSourceId: string,
+  cfg: any,
+  targetDatabase?: string
+) {
+  if (targetDatabase) {
+    // Database-level sync - sync only the specified database
+    return await ingestMSSQLSingleDatabase(tenantId, dataSourceId, cfg, targetDatabase);
+  } else {
+    // Server-level sync - discover and sync ALL user databases
+    return await ingestMSSQLAllDatabases(tenantId, dataSourceId, cfg);
+  }
+}
+
+/**
+ * Get all available databases for filtering with rich metadata
+ * Combines synced databases from catalog with available databases from live discovery
+ */
+const getAllDatabases = async (req: Request, res: Response) => {
+  try {
+    const q = req.query as any;
+    const dataSourceId = q.datasourceId || q.dataSourceId;
+
+    // Build WHERE clause for data sources query
+    const where: string[] = ['deleted_at IS NULL'];  // Exclude deleted data sources
+    const params: any[] = [];
+    let i = 1;
+
+    if (dataSourceId) {
+      where.push(`id::text = $${i++}`);
+      params.push(dataSourceId);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // Get all data sources (excluding deleted ones)
+    const { rows: dataSources } = await cpdb.query<DSRow>(
+      `SELECT id::text AS id, type, connection_config AS cfg, name
+       FROM data_sources ${whereSql}
+       ORDER BY name`,
+      params
+    );
+
+    const result: Array<{
+      dataSourceId: string;
+      dataSourceName: string;
+      dataSourceType: string;
+      databases: Array<{
+        name: string;
+        isSystem: boolean;
+        isSynced: boolean;
+        lastSyncAt?: string;
+        assetCount?: number;
+      }>;
+      systemDatabases: string[];
+    }> = [];
+
+    for (const ds of dataSources) {
+      const systemDatabases = getSystemDatabasesForType(ds.type);
+      const systemDbSet = new Set(systemDatabases.map(db => db.toLowerCase()));
+      const databaseMap = new Map<string, {
+        name: string;
+        isSystem: boolean;
+        isSynced: boolean;
+        lastSyncAt?: string;
+        assetCount?: number;
+      }>();
+
+      // First, get synced databases from catalog with sync metadata
+      const { rows: syncedDbs } = await cpdb.query(
+        `SELECT
+          database_name,
+          COUNT(*) as asset_count,
+          MAX(updated_at) as last_sync_at
+         FROM catalog_assets
+         WHERE datasource_id = $1 AND database_name IS NOT NULL
+         GROUP BY database_name`,
+        [ds.id]
+      );
+
+      syncedDbs.forEach((row: any) => {
+        const dbName = row.database_name;
+        const isSystem = systemDbSet.has(dbName.toLowerCase());
+        databaseMap.set(dbName, {
+          name: dbName,
+          isSystem,
+          isSynced: true,
+          lastSyncAt: row.last_sync_at,
+          assetCount: parseInt(row.asset_count) || 0
+        });
+      });
+
+      // Then, try to discover available databases from the connection
+      try {
+        let cfg = (ds as any).cfg || {};
+        if (typeof cfg === 'string') {
+          try { cfg = JSON.parse(cfg); } catch { cfg = {}; }
+        }
+        if (isEncryptedConfig(cfg)) {
+          cfg = decryptConfig(cfg);
+        }
+
+        const discoveredDatabases: string[] = [];
+
+        if (ds.type === 'postgresql') {
+          const buildClient = (db?: string) => new PgClient({
+            host: cfg.host,
+            port: cfg.port || 5432,
+            user: cfg.username,
+            password: cfg.password,
+            database: db || cfg.database || 'postgres',
+            ssl: cfg.ssl === false ? undefined : cfg.ssl,
+            connectionTimeoutMillis: 5000,
+          });
+
+          let client = buildClient(cfg.database);
+          try {
+            await client.connect();
+          } catch (err: any) {
+            // Retry with 'postgres' database
+            client = buildClient('postgres');
+            await client.connect();
+          }
+
+          const result = await client.query(
+            `SELECT datname FROM pg_database
+             WHERE datistemplate = false
+             ORDER BY datname`
+          );
+          result.rows.forEach((r: any) => discoveredDatabases.push(r.datname));
+          await client.end();
+        } else if (ds.type === 'mssql') {
+          const pool = await mssql.connect({
+            server: cfg.host || cfg.server,
+            port: cfg.port || 1433,
+            user: cfg.username || cfg.user,
+            password: cfg.password,
+            database: cfg.database || 'master',
+            options: {
+              encrypt: cfg.encrypt !== false,
+              trustServerCertificate: cfg.trustServerCertificate !== false,
+              enableArithAbort: true,
+            },
+            connectionTimeout: 5000,
+          });
+
+          const dbResult = await pool.request().query(`
+            SELECT name FROM sys.databases
+            ORDER BY name
+          `);
+          dbResult.recordset.forEach((r: any) => discoveredDatabases.push(r.name));
+          await pool.close();
+        }
+
+        // Add discovered databases that aren't already synced
+        discoveredDatabases.forEach(dbName => {
+          if (!databaseMap.has(dbName)) {
+            const isSystem = systemDbSet.has(dbName.toLowerCase());
+            databaseMap.set(dbName, {
+              name: dbName,
+              isSystem,
+              isSynced: false
+            });
+          }
+        });
+      } catch (error) {
+        // If live discovery fails, we still have synced databases
+        console.warn(`Failed to discover databases for ${ds.name}:`, error);
+      }
+
+      if (databaseMap.size > 0) {
+        result.push({
+          dataSourceId: ds.id,
+          dataSourceName: (ds as any).name || 'Unknown',
+          dataSourceType: ds.type,
+          databases: Array.from(databaseMap.values()).sort((a, b) => a.name.localeCompare(b.name)),
+          systemDatabases
+        });
+      }
+    }
+
+    ok(res, result);
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+};
 
 /* -------------------------- Validation/Zod ------------------------- */
 
@@ -328,12 +767,26 @@ const listAssets = async (req: Request, res: Response) => {
     if (q.type)   { where.push(`ca.asset_type = $${i++}`); p.push(q.type); }
     const dsId = q.datasourceId || q.dataSourceId; // Support both camelCase and lowercase
     if (dsId){ where.push(`ca.datasource_id::text = $${i++}`); p.push(dsId); }
+
+    // Support multiple databases (comma-separated string or single database)
+    if (q.databases) {
+      const dbList = q.databases.split(',').map(d => d.trim()).filter(Boolean);
+      if (dbList.length > 0) {
+        where.push(`ca.database_name = ANY($${i++})`);
+        p.push(dbList);
+      }
+    } else if (q.database) {
+      where.push(`ca.database_name = $${i++}`);
+      p.push(q.database);
+    }
+
     if (q.schema) { where.push(`ca.schema_name = $${i++}`); p.push(q.schema); }
     // Object type filter: user (exclude system schemas) or system (only system schemas)
     if (q.objectType === 'user') {
       where.push(`ca.schema_name NOT IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast')`);
+      where.push(`ca.database_name NOT IN ('master', 'tempdb', 'model', 'msdb')`); // Exclude system databases
     } else if (q.objectType === 'system') {
-      where.push(`ca.schema_name IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast')`);
+      where.push(`(ca.schema_name IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast') OR ca.database_name IN ('master', 'tempdb', 'model', 'msdb'))`);
     }
     if (q.tags) {
       where.push(`
@@ -348,13 +801,15 @@ const listAssets = async (req: Request, res: Response) => {
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const userId = (req as any).user?.id || 'system';
 
     const listSql = `
-      SELECT ca.id, ca.datasource_id, ca.asset_type, ca.schema_name, ca.table_name, ca.tags,
+      SELECT ca.id, ca.datasource_id, ca.asset_type, ca.schema_name, ca.table_name, ca.database_name, ca.tags,
              ca.row_count, ca.column_count, ca.description, ca.created_at, ca.updated_at,
              ca.trust_score, ca.quality_score, ca.view_count, ca.owner_id, ca.rating_avg,
              ca.bookmark_count, ca.comment_count, ca.last_profiled_at,
-             ds.name as datasource_name, ds.type as datasource_type
+             ds.name as datasource_name, ds.type as datasource_type,
+             EXISTS(SELECT 1 FROM catalog_bookmarks WHERE object_id = ca.id AND user_id = '${userId}') as is_bookmarked
       FROM catalog_assets ca
       LEFT JOIN data_sources ds ON ca.datasource_id = ds.id
       ${whereSql}
@@ -377,6 +832,7 @@ const listAssets = async (req: Request, res: Response) => {
       schema: row.schema_name,
       table: row.table_name,
       name: row.table_name,
+      databaseName: row.database_name,
       tags: row.tags || [],
       rowCount: row.row_count ? Number(row.row_count) : null,
       columnCount: row.column_count ? Number(row.column_count) : null,
@@ -391,6 +847,7 @@ const listAssets = async (req: Request, res: Response) => {
       bookmarkCount: row.bookmark_count || 0,
       commentCount: row.comment_count || 0,
       lastProfiledAt: row.last_profiled_at,
+      isBookmarked: row.is_bookmarked || false,
     }));
 
     const payload = { assets: items, pagination: { page, limit, total: t, totalPages } };
@@ -411,16 +868,26 @@ const listAssets = async (req: Request, res: Response) => {
 
 const getAsset = async (req: Request, res: Response) => {
   try {
+    const userId = (req as any).user?.id || 'system';
     const { rows } = await cpdb.query(
-      `SELECT a.*, jsonb_agg(c ORDER BY c.ordinal) AS columns
+      `SELECT a.*,
+              jsonb_agg(c ORDER BY c.ordinal) AS columns,
+              EXISTS(SELECT 1 FROM catalog_bookmarks WHERE object_id = a.id AND user_id = $2) as is_bookmarked
        FROM catalog_assets a
        LEFT JOIN catalog_columns c ON c.asset_id = a.id
        WHERE a.id::text = $1
        GROUP BY a.id`,
-      [req.params.id]
+      [req.params.id, userId]
     );
     if (!rows[0]) return fail(res, 404, 'Not found');
-    ok(res, rows[0]);
+
+    // Transform is_bookmarked to isBookmarked for frontend
+    const asset = rows[0];
+    if (asset.is_bookmarked !== undefined) {
+      asset.isBookmarked = asset.is_bookmarked;
+    }
+
+    ok(res, asset);
   } catch (e: any) {
     fail(res, 500, e.message);
   }
@@ -448,22 +915,35 @@ const exportAssets = async (req: Request, res: Response) => {
       p.push(q.tags.split(',').map(t => t.trim()));
       i++;
     }
+
+    // Object type filter: user (exclude system schemas) or system (only system schemas)
+    if (q.objectType === 'user') {
+      where.push(`schema_name NOT IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast')`);
+      where.push(`database_name NOT IN ('master', 'tempdb', 'model', 'msdb')`);
+    } else if (q.objectType === 'system') {
+      where.push(`(schema_name IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast') OR database_name IN ('master', 'tempdb', 'model', 'msdb'))`);
+    }
+
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const { rows } = await cpdb.query(
-      `SELECT datasource_id::text AS datasource_id, asset_type, schema_name, table_name, display_name, owner, quality, classification, row_count, tags, description, updated_at
+      `SELECT datasource_id::text AS datasource_id, asset_type, schema_name, table_name, database_name,
+              row_count, column_count, tags, description, trust_score, quality_score, rating_avg,
+              owner_id, domain, sensitivity_level, is_deprecated, created_at, updated_at
        FROM catalog_assets
        ${whereSql}
-       ORDER BY schema_name, table_name`,
+       ORDER BY database_name, schema_name, table_name`,
       p
     );
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="assets-${Date.now()}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="catalog-assets-${Date.now()}.csv"`);
 
     const header = [
-      'datasource_id','asset_type','schema_name','table_name','display_name',
-      'owner','quality','classification','row_count','tags','description','updated_at'
+      'datasource_id','asset_type','database_name','schema_name','table_name',
+      'row_count','column_count','trust_score','quality_score','rating_avg',
+      'owner_id','domain','sensitivity_level','is_deprecated','tags','description',
+      'created_at','updated_at'
     ];
     res.write(header.join(',') + '\n');
 
@@ -478,15 +958,21 @@ const exportAssets = async (req: Request, res: Response) => {
       res.write([
         esc(r.datasource_id),
         esc(r.asset_type),
+        esc(r.database_name ?? ''),
         esc(r.schema_name),
         esc(r.table_name),
-        esc(r.display_name ?? ''),
-        esc(r.owner ?? ''),
-        esc(r.quality ?? ''),
-        esc(r.classification ?? ''),
         esc(r.row_count ?? ''),
+        esc(r.column_count ?? ''),
+        esc(r.trust_score ?? ''),
+        esc(r.quality_score ?? ''),
+        esc(r.rating_avg ?? ''),
+        esc(r.owner_id ?? ''),
+        esc(r.domain ?? ''),
+        esc(r.sensitivity_level ?? ''),
+        esc(r.is_deprecated ? 'true' : 'false'),
         esc(tags),
         esc(r.description ?? ''),
+        esc(r.created_at ? new Date(r.created_at).toISOString() : ''),
         esc(r.updated_at ? new Date(r.updated_at).toISOString() : '')
       ].join(',') + '\n');
     }
@@ -520,12 +1006,70 @@ router.patch('/catalog/assets/:id', async (req, res) => {
   }
 });
 
-// Profile launch & read
+// Profile launch & read - Direct row count scan
 router.post('/catalog/assets/:id/profile', async (req, res) => {
   try {
     const assetId = String(req.params.id);
-    await ProfileQueue.add('profile-one', { assetId }, { removeOnComplete: 100, removeOnFail: 100 });
-    ok(res, { queued: true });
+
+    // Get asset details
+    const { rows: assetRows } = await cpdb.query(
+      `SELECT ca.*, ds.type as ds_type, ds.connection_config
+       FROM catalog_assets ca
+       LEFT JOIN data_sources ds ON ca.datasource_id = ds.id
+       WHERE ca.id::text = $1`,
+      [assetId]
+    );
+
+    if (!assetRows[0]) {
+      return fail(res, 404, 'Asset not found');
+    }
+
+    const asset = assetRows[0];
+    const dsType = asset.ds_type;
+    const config = { ...asset.connection_config, type: dsType };
+
+    console.log('Profile asset:', { assetId, table: asset.table_name, dsType, hasConfig: !!config });
+
+    // Quick row count - try to get it directly
+    try {
+      const { ConnectorFactory } = require('../services/connectors/factory');
+      const connector = await ConnectorFactory.createConnector(config);
+
+      let rowCount = null;
+
+      // Build the appropriate query based on database type
+      if (dsType === 'postgresql') {
+        const countQuery = `SELECT COUNT(*) as count FROM "${asset.schema_name}"."${asset.table_name}"`;
+        const result = await connector.executeQuery(countQuery);
+        rowCount = parseInt(result.rows[0]?.count || 0);
+      } else if (dsType === 'mssql') {
+        const schema = asset.schema_name || 'dbo';
+        const countQuery = `SELECT COUNT(*) as count FROM [${asset.database_name}].[${schema}].[${asset.table_name}]`;
+        const result = await connector.executeQuery(countQuery);
+        rowCount = parseInt(result.rows[0]?.count || 0);
+      }
+
+      await connector.close();
+
+      // Update the asset with the row count
+      if (rowCount !== null) {
+        await cpdb.query(
+          `UPDATE catalog_assets SET row_count = $1, last_profiled_at = now(), updated_at = now() WHERE id::text = $2`,
+          [rowCount, assetId]
+        );
+
+        ok(res, { success: true, rowCount, profiledAt: new Date() });
+      } else {
+        // Fallback to queue
+        await ProfileQueue.add('profile-one', { assetId }, { removeOnComplete: 100, removeOnFail: 100 });
+        ok(res, { queued: true });
+      }
+    } catch (queryError: any) {
+      console.error('Direct profile failed, falling back to queue:', queryError.message);
+      // Fallback to queue if direct query fails
+      await ProfileQueue.add('profile-one', { assetId }, { removeOnComplete: 100, removeOnFail: 100 });
+      ok(res, { queued: true });
+    }
   } catch (e: any) {
     fail(res, 500, e.message);
   }
@@ -614,7 +1158,7 @@ router.get('/catalog/metrics', async (_req: Request, res: Response) => {
 router.get('/catalog/assets/:id/preview', async (req: Request, res: Response) => {
   try {
     const { rows: assets } = await cpdb.query(
-      `SELECT datasource_id, schema_name, table_name, asset_type FROM catalog_assets WHERE id::text = $1`,
+      `SELECT datasource_id, schema_name, table_name, database_name, asset_type FROM catalog_assets WHERE id::text = $1`,
       [req.params.id]
     );
     if (!assets[0]) return fail(res, 404, 'Asset not found');
@@ -623,13 +1167,16 @@ router.get('/catalog/assets/:id/preview', async (req: Request, res: Response) =>
     const limit = Math.min(100, Number(req.query.limit || 20));
     const { type, cfg } = await getDataSourceById(asset.datasource_id);
 
+    // Use database_name from the asset, fallback to cfg.database
+    const targetDatabase = asset.database_name || cfg.database;
+
     let previewData: any[] = [];
 
     if (type === 'postgresql') {
       const client = new PgClient({
         host: cfg.host,
         port: Number(cfg.port ?? 5432),
-        database: cfg.database,
+        database: targetDatabase,
         user: cfg.username,
         password: cfg.password,
         ssl: cfg.ssl === false || cfg.ssl?.mode === 'disable' ? undefined : cfg.ssl,
@@ -642,7 +1189,7 @@ router.get('/catalog/assets/:id/preview', async (req: Request, res: Response) =>
       const pool = await mssql.connect({
         server: cfg.host || cfg.server,
         port: Number(cfg.port ?? 1433),
-        database: cfg.database,
+        database: targetDatabase,
         user: cfg.username || cfg.user,
         password: cfg.password,
         options: { encrypt: cfg.ssl !== false, trustServerCertificate: true, ...(cfg.options || {}) }
@@ -689,26 +1236,93 @@ router.post('/catalog/assets/:id/bookmark', async (req: Request, res: Response) 
     const assetId = req.params.id;
     const userId = (req as any).user?.id || 'system'; // Get from auth middleware
 
-    // Check if already bookmarked
+    // Check if already bookmarked (using object_id which is the actual column name)
     const { rows: existing } = await cpdb.query(
-      `SELECT id FROM catalog_bookmarks WHERE asset_id::text = $1 AND user_id = $2`,
+      `SELECT id FROM catalog_bookmarks WHERE object_id::text = $1 AND user_id = $2`,
       [assetId, userId]
     );
 
     if (existing.length > 0) {
       // Remove bookmark
       await cpdb.query(`DELETE FROM catalog_bookmarks WHERE id = $1`, [existing[0].id]);
-      await cpdb.query(`UPDATE catalog_assets SET bookmark_count = GREATEST(0, bookmark_count - 1) WHERE id::text = $1`, [assetId]);
+      // Update bookmark count if column exists
+      const { rows: assetCheck } = await cpdb.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name='catalog_assets' AND column_name='bookmark_count'`
+      );
+      if (assetCheck.length > 0) {
+        await cpdb.query(`UPDATE catalog_assets SET bookmark_count = GREATEST(0, bookmark_count - 1) WHERE id::text = $1`, [assetId]);
+      }
       ok(res, { bookmarked: false });
     } else {
-      // Add bookmark
+      // Add bookmark (using object_id column)
       await cpdb.query(
-        `INSERT INTO catalog_bookmarks (asset_id, user_id, created_at) VALUES ($1::uuid, $2, now())`,
+        `INSERT INTO catalog_bookmarks (object_id, user_id, created_at) VALUES ($1::bigint, $2, now())`,
         [assetId, userId]
       );
-      await cpdb.query(`UPDATE catalog_assets SET bookmark_count = bookmark_count + 1 WHERE id::text = $1`, [assetId]);
+      // Update bookmark count if column exists
+      const { rows: assetCheck } = await cpdb.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name='catalog_assets' AND column_name='bookmark_count'`
+      );
+      if (assetCheck.length > 0) {
+        await cpdb.query(`UPDATE catalog_assets SET bookmark_count = bookmark_count + 1 WHERE id::text = $1`, [assetId]);
+      }
       ok(res, { bookmarked: true });
     }
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Rate asset
+router.post('/catalog/assets/:id/rate', async (req: Request, res: Response) => {
+  try {
+    const assetId = req.params.id;
+    const userId = (req as any).user?.id || '00000000-0000-0000-0000-000000000000'; // Use null UUID for system
+    const { rating } = req.body;
+
+    // Validate rating
+    if (!rating || rating < 1 || rating > 5) {
+      return fail(res, 400, 'Rating must be between 1 and 5');
+    }
+
+    // Upsert rating (insert or update if exists)
+    await cpdb.query(
+      `INSERT INTO asset_ratings (asset_id, user_id, rating, tenant_id, created_at, updated_at)
+       VALUES ($1::bigint, $2::uuid, $3, 1, now(), now())
+       ON CONFLICT (asset_id, user_id)
+       DO UPDATE SET rating = $3, updated_at = now()`,
+      [assetId, userId, rating]
+    );
+
+    // Update average rating on catalog_assets if rating_avg column exists
+    const { rows: avgResult } = await cpdb.query(
+      `SELECT AVG(rating)::numeric(3,2) as avg_rating, COUNT(*) as count
+       FROM asset_ratings
+       WHERE asset_id = $1::bigint`,
+      [assetId]
+    );
+
+    const avgRating = avgResult[0]?.avg_rating || 0;
+    const ratingCount = avgResult[0]?.count || 0;
+
+    // Check if rating_avg column exists before updating
+    const { rows: columnCheck } = await cpdb.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name='catalog_assets' AND column_name='rating_avg'`
+    );
+
+    if (columnCheck.length > 0) {
+      await cpdb.query(
+        `UPDATE catalog_assets SET rating_avg = $1 WHERE id::text = $2`,
+        [avgRating, assetId]
+      );
+    }
+
+    ok(res, {
+      rating,
+      avgRating: Number(avgRating),
+      ratingCount: Number(ratingCount)
+    });
   } catch (e: any) {
     fail(res, 500, e.message);
   }
@@ -899,13 +1513,14 @@ router.post('/catalog/assets/:id/description', async (req: Request, res: Respons
 router.post('/data-sources/:id/sync', async (req: Request, res: Response) => {
   const id = String(req.params.id);
   const doAsync = String(req.query.async ?? 'false') === 'true';
+  const targetDatabase = req.query.database ? String(req.query.database) : undefined;
 
   try {
     const { tenantId, type, cfg, idText } = await getDataSourceById(id);
 
     const run = async () => {
-      if (type === 'postgresql') return ingestPostgres(tenantId, idText, cfg);
-      if (type === 'mssql') return ingestMSSQL(tenantId, idText, cfg);
+      if (type === 'postgresql') return ingestPostgres(tenantId, idText, cfg, targetDatabase);
+      if (type === 'mssql') return ingestMSSQL(tenantId, idText, cfg, targetDatabase);
       throw new Error(`Unsupported datasource type: ${type}`);
     };
 
@@ -938,8 +1553,77 @@ router.post('/data-sources/:id/sync', async (req: Request, res: Response) => {
 });
 
 /* -------------------------- Dual registration --------------------- */
+// Catalog summary endpoint - returns counts by type based on filters
+router.get('/catalog/summary', async (req: Request, res: Response) => {
+  try {
+    const q = req.query as Record<string, string|undefined>;
+    const where: string[] = [];
+    const p: any[] = [];
+    let i = 1;
+
+    // Apply same filters as listAssets
+    if (q.search) { where.push(`(ca.schema_name || '.' || ca.table_name || ' ' || coalesce(ca.description,'')) ILIKE $${i++}`); p.push(`%${q.search}%`); }
+    const dsId = q.datasourceId || q.dataSourceId;
+    if (dsId){ where.push(`ca.datasource_id::text = $${i++}`); p.push(dsId); }
+
+    // Support multiple databases
+    if (q.databases) {
+      const dbList = q.databases.split(',').map(d => d.trim()).filter(Boolean);
+      if (dbList.length > 0) {
+        where.push(`ca.database_name = ANY($${i++})`);
+        p.push(dbList);
+      }
+    } else if (q.database) {
+      where.push(`ca.database_name = $${i++}`);
+      p.push(q.database);
+    }
+
+    if (q.schema) { where.push(`ca.schema_name = $${i++}`); p.push(q.schema); }
+
+    // Object type filter
+    if (q.objectType === 'user') {
+      where.push(`ca.schema_name NOT IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast')`);
+      where.push(`ca.database_name NOT IN ('master', 'tempdb', 'model', 'msdb')`); // Exclude system databases
+    } else if (q.objectType === 'system') {
+      where.push(`(ca.schema_name IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast') OR ca.database_name IN ('master', 'tempdb', 'model', 'msdb'))`);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // Get counts by type and total rows
+    const countsSql = `
+      SELECT
+        COUNT(*) FILTER (WHERE asset_type = 'table') as table_count,
+        COUNT(*) FILTER (WHERE asset_type = 'view') as view_count,
+        COUNT(*) as total_count,
+        COUNT(DISTINCT datasource_id) as source_count,
+        COUNT(DISTINCT schema_name) as schema_count,
+        SUM(COALESCE(row_count, 0)) as total_rows
+      FROM catalog_assets ca
+      ${whereSql}
+    `;
+
+    const result = await cpdb.query(countsSql, p);
+    const counts = result.rows[0];
+
+    ok(res, {
+      totalAssets: Number(counts.total_count || 0),
+      totalSources: Number(counts.source_count || 0),
+      totalSchemas: Number(counts.schema_count || 0),
+      totalRows: Number(counts.total_rows || 0),
+      byType: {
+        table: Number(counts.table_count || 0),
+        view: Number(counts.view_count || 0),
+      }
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
 /* These ensure the FE can call either /api/catalog/assets or /api/assets */
 // IMPORTANT: List and export routes (no :id) must come before /:id routes
+router.get('/catalog/databases', getAllDatabases);
 router.get('/catalog/assets/export', exportAssets);
 router.get('/assets/export', exportAssets);
 router.get('/catalog/assets', listAssets);
