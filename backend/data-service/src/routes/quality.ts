@@ -9,6 +9,7 @@ import { asyncHandler } from '../middleware/error';
 import { createRateLimit } from '../middleware/rateLimit';
 import { validateRequest } from '../middleware/validation';
 import { pool } from '../db/pool';
+import autopilotRoutes from './autopilot';
 
 const router = Router();
 const controller = new QualityController();
@@ -1294,5 +1295,8 @@ router.get(
   auditMiddleware('QUALITY_ML_MODEL_METRICS', 'READ'),
   asyncHandler(enhancedAlertsController.getMLModelMetrics)
 );
+
+// Mount autopilot routes
+router.use('/autopilot', autopilotRoutes);
 
 export default router;
