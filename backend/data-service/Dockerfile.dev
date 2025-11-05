@@ -2,11 +2,13 @@
 FROM node:20-alpine
 WORKDIR /app
 
-# 1) copy only package.json (not package-lock since we're in a workspace)
+# 1) copy package files
 COPY package.json ./
+COPY package-lock.json* ./
 
 # 2) Install dependencies (use npm install for dev, ignore scripts to speed up)
-RUN npm install --ignore-scripts --no-audit --no-fund || npm install --no-audit --no-fund
+# Use --legacy-peer-deps if there are peer dependency conflicts
+RUN npm install --ignore-scripts --no-audit --no-fund --legacy-peer-deps || npm install --no-audit --no-fund
 
 # 3) app files
 COPY . .

@@ -276,15 +276,6 @@ const CONNECTORS: ConnectorTemplate[] = [
         group: 'basic',
       },
       {
-        key: 'database',
-        label: 'Database',
-        type: 'text',
-        required: false,
-        placeholder: 'postgres',
-        group: 'basic',
-        help: 'Used for the connectivity test. Defaults to "postgres".',
-      },
-      {
         key: 'username',
         label: 'Username',
         type: 'text',
@@ -345,7 +336,6 @@ const CONNECTORS: ConnectorTemplate[] = [
         config: {
           host: 'localhost',
           port: 5432,
-          database: 'postgres', 
           username: 'postgres',
           ssl: false,
           discoveryMode: 'auto',
@@ -360,7 +350,7 @@ const CONNECTORS: ConnectorTemplate[] = [
         config: { port: 5432, ssl: true, discoveryMode: 'scheduled' },
       },
     ],
-    configKeys: ['host', 'port','database' ,'username', 'password', 'ssl'] as const,
+    configKeys: ['host', 'port', 'username', 'password', 'ssl'] as const,
   },
 
   {
@@ -1749,6 +1739,27 @@ export default function AddConnectionWizard({
     const errs = validate(selected, cfg)
     setErrors(errs)
     if (Object.keys(errs).length) {
+      setStep('Configure Connection')
+      return
+    }
+
+    // Check for duplicate connections (same host:port)
+    const newHost = cfg.host as string
+    const newPort = cfg.port || ''
+    const isDuplicate = existingConnections.some(conn => {
+      const existingCfg = conn.connectionConfig as any
+      const existingHost = existingCfg?.host || existingCfg?.server || ''
+      const existingPort = existingCfg?.port || ''
+
+      return (
+        existingHost.toLowerCase() === newHost?.toLowerCase() &&
+        String(existingPort) === String(newPort) &&
+        conn.type === selected.submitType
+      )
+    })
+
+    if (isDuplicate) {
+      setCreateError(`A connection to ${newHost}${newPort ? ':' + newPort : ''} already exists. Please use a different server or edit the existing connection.`)
       setStep('Configure Connection')
       return
     }

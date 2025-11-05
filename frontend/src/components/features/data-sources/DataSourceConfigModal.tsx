@@ -452,19 +452,6 @@ function ConnectionTab({
             />
           </div>
 
-          {!isServerLevel && (
-            <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Database
-              </label>
-              <Input
-                value={config.database || ''}
-                onChange={(e) => updateConnectionConfig('database', e.target.value)}
-                placeholder="mydb"
-              />
-            </div>
-          )}
-
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Username
@@ -492,22 +479,18 @@ function ConnectionTab({
           </div>
         </div>
 
-        {isServerLevel && (
-          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <div className="flex items-start gap-2">
-              <Info className="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" />
-              <div className="text-sm text-blue-700">
-                <strong>Server-Level Connection</strong>
-                <p className="mt-1">This connection can access multiple databases on the server.</p>
-                {config.databases && config.databases.length > 0 && (
-                  <p className="mt-1">
-                    Currently tracking: <strong>{config.databases.join(', ')}</strong>
-                  </p>
-                )}
-              </div>
+        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="flex items-start gap-2">
+            <Info className="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" />
+            <div className="text-sm text-blue-700">
+              <strong>Server-Level Connection</strong>
+              <p className="mt-1">
+                This connection provides access to the entire database server.
+                Select which databases to work with using the <strong>database filter</strong> in Data Catalog, Data Quality, and other pages.
+              </p>
             </div>
           </div>
-        )}
+        </div>
       </Card>
 
       {/* Security */}

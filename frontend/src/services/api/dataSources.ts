@@ -265,45 +265,49 @@ export const dataSourcesApi = {
     return { databases: [], metadata: undefined }
   },
 
-  async sync(id: string) {
+  async sync(id: string, database?: string) {
     // Some deployments return an envelope { success, data }, and some expose
     // the endpoint under different route groups. Try primary + fallbacks and
     // always unwrap the payload before normalizing. If the primary returns 5xx,
     // attempt an alternate discovery endpoint.
     const encoded = encodeURIComponent(id)
     const tryNormalize = (res: any) => normalizeSyncResult((res as any)?.data?.data ?? (res as any)?.data, id)
+    const params = database ? { database } : undefined
 
-    // 1) Primary
+    // 1) Primary - try API gateway first, fallback on any error
     try {
-      const res = await http.post<any>(`/data-sources/${encoded}/sync`)
+      const res = await http.post<any>(`/data-sources/${encoded}/sync`, null, { params })
       return tryNormalize(res)
     } catch (e: any) {
       const status = e?.response?.status ?? e?.status
-      // If 404/405 or other, continue to fallbacks; for 5xx continue as well
-      if (![404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
+      console.log('[SYNC] Attempt #1 failed with status:', status, 'error:', e, '- trying fallback #2')
+      // If status is undefined or in fallback list, continue to next attempt
+      // Status can be undefined when http interceptor re-throws as new Error()
+      if (status !== undefined && ![400, 404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
     }
 
     // 2) Discover (older API): /sources/:id/discover
     try {
-      const res = await http.post<any>(`/sources/${encoded}/discover`)
+      const res = await http.post<any>(`/sources/${encoded}/discover`, null, { params })
       return tryNormalize(res)
     } catch (e: any) {
       const status = e?.response?.status ?? e?.status
-      if (status && ![404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
+      console.log('[SYNC] Attempt #2 failed with status:', status, '- trying fallback #3')
+      // Allow undefined status to continue to fallback
+      if (status !== undefined && ![400, 404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
     }
 
-    // 3) Try same path without /api base (catalog routes are mounted at root)
+    // 3) Try data-service directly (port 3002)
     try {
-      const rootBase = (http.defaults.baseURL || '').replace(/\/?api\/?$/, '') || undefined
-      const res = await http.post<any>(`/data-sources/${encoded}/sync`, { force: true }, { baseURL: rootBase })
+      const res = await http.post<any>(`/data-sources/${encoded}/sync`, null, { baseURL: 'http://localhost:3002', params })
       return tryNormalize(res)
     } catch (e: any) {
       const status = e?.response?.status ?? e?.status
-      if (status && ![404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
+      if (status && ![400, 404, 405, 500, 502, 503, 504].includes(Number(status))) throw e
     }
 
-    // 4) Async hint on root path
-    const res = await http.post<any>(`/data-sources/${encoded}/sync`, { force: true }, { params: { async: 'true' }, baseURL: (http.defaults.baseURL || '').replace(/\/?api\/?$/, '') || undefined })
+    // 4) Async hint on data-service
+    const res = await http.post<any>(`/data-sources/${encoded}/sync`, null, { params: { async: 'true', ...params }, baseURL: 'http://localhost:3002' })
     return tryNormalize(res)
   },
 
@@ -593,8 +597,8 @@ export async function deleteDataSource(id: string) {
 export async function testDataSource(id: string) {
   return dataSourcesApi.test(id)
 }
-export async function syncDataSource(id: string) {
-  return dataSourcesApi.sync(id)
+export async function syncDataSource(id: string, database?: string) {
+  return dataSourcesApi.sync(id, database)
 }
 export async function listDataSourceDatabases(id: string) {
   return dataSourcesApi.listDatabases(id)

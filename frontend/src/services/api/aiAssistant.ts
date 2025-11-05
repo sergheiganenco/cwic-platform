@@ -261,9 +261,9 @@ class AIAssistantService {
 
   private shouldEnableMockMode(configValue?: boolean): boolean {
     if (configValue !== undefined) return configValue;
-    
-    // Only enable mock mode in development and when explicitly enabled
-    return isDevelopment && import.meta.env?.VITE_ENABLE_MOCK_MODE !== 'false';
+
+    // Only enable mock mode when explicitly enabled
+    return import.meta.env?.VITE_ENABLE_MOCK_MODE === 'true';
   }
 
   private shouldEnableLogging(configValue?: boolean): boolean {
@@ -695,13 +695,14 @@ class AIAssistantService {
       const startTime = performance.now?.() ?? Date.now();
 
       const response = await this.requestWithRetry(() =>
-        this.api.post('/discovery/query', {
+        this.api.post('/discovery/enhanced-query', {
           query: message,
-          context: {
-            timestamp: new Date().toISOString(),
-            clientType: 'web',
-            userAgent: isBrowser ? navigator.userAgent : 'node',
-            ...context,
+          sessionId: (context as any)?.sessionId,
+          includeContext: true,
+          preferences: {
+            detailLevel: 'detailed',
+            includeCode: true,
+            includeRecommendations: true,
           },
         }, {
           timeout: context?.timeout || this.config.timeout,
@@ -716,7 +717,7 @@ class AIAssistantService {
         data: this.normalizeResponseData(response.data?.data, message),
         meta: {
           processingTime,
-          model: response.data?.meta?.model || 'unknown',
+          model: response.data?.meta?.model || 'enhanced-ai',
           requestId,
           timestamp: new Date().toISOString(),
           ...response.data?.meta,
@@ -734,6 +735,52 @@ class AIAssistantService {
       return this.handleRequestError(error, requestId);
     } finally {
       this.activeRequests.delete(requestId);
+    }
+  }
+
+  /**
+   * Send message with fallback to basic query if enhanced fails
+   */
+  public async sendMessageWithFallback(message: string, context?: RequestContext): Promise<AIResponse> {
+    try {
+      return await this.sendMessage(message, context);
+    } catch (error) {
+      // Fallback to basic query endpoint
+      if (this.config.enableLogging) {
+        console.warn('[AI Service] Enhanced query failed, trying basic query');
+      }
+
+      try {
+        const abortController = new AbortController();
+        const requestId = context?.requestId || generateRequestId();
+        this.activeRequests.set(requestId, abortController);
+
+        const response = await this.requestWithRetry(() =>
+          this.api.post('/discovery/query', {
+            query: message,
+            context: {
+              timestamp: new Date().toISOString(),
+              clientType: 'web',
+            },
+          }, {
+            timeout: context?.timeout || this.config.timeout,
+            signal: abortController.signal,
+          })
+        );
+
+        return {
+          success: true,
+          data: this.normalizeResponseData(response.data?.data, message),
+          meta: {
+            processingTime: 0,
+            model: 'basic-query',
+            requestId,
+            timestamp: new Date().toISOString(),
+          },
+        };
+      } catch (fallbackError) {
+        return this.handleRequestError(fallbackError, context?.requestId);
+      }
     }
   }
 

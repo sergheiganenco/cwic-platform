@@ -242,6 +242,9 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
           if (filters.dataSourceId) {
             filtered = filtered.filter((a) => a.dataSourceId === filters.dataSourceId);
           }
+          if (filters.database) {
+            filtered = filtered.filter((a) => (a as any).database === filters.database);
+          }
           if (filters.schema) {
             filtered = filtered.filter((a) => a.schema === filters.schema);
           }
@@ -352,6 +355,7 @@ export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssets
         'type',
         'objectType',
         'dataSourceId',
+        'database',
         'schema',
         'sortBy',
         'sortOrder'

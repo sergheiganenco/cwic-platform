@@ -5,6 +5,12 @@ import { Client as PgClient, Pool, QueryResult } from 'pg';
 import { z } from 'zod';
 import { ProfileQueue } from '../queue';
 import { decryptConfig, isEncryptedConfig } from '../utils/secrets';
+import { LineageDiscoveryService } from '../services/LineageDiscoveryService';
+import { HeuristicLineageService } from '../services/HeuristicLineageService';
+import { FKMetadataService } from '../services/FKMetadataService';
+import { SimpleLineageService } from '../services/SimpleLineageService';
+import { EnhancedLineageService } from '../services/EnhancedLineageService';
+import { PIIQualityIntegration, PIIViolation } from '../services/PIIQualityIntegration';
 
 const router = Router();
 const cpdb = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -807,7 +813,7 @@ const listAssets = async (req: Request, res: Response) => {
       SELECT ca.id, ca.datasource_id, ca.asset_type, ca.schema_name, ca.table_name, ca.database_name, ca.tags,
              ca.row_count, ca.column_count, ca.description, ca.created_at, ca.updated_at,
              ca.trust_score, ca.quality_score, ca.view_count, ca.owner_id, ca.rating_avg,
-             ca.bookmark_count, ca.comment_count, ca.last_profiled_at,
+             ca.bookmark_count, ca.comment_count, ca.last_profiled_at, ca.pii_detected,
              ds.name as datasource_name, ds.type as datasource_type,
              EXISTS(SELECT 1 FROM catalog_bookmarks WHERE object_id = ca.id AND user_id = '${userId}') as is_bookmarked
       FROM catalog_assets ca
@@ -848,6 +854,7 @@ const listAssets = async (req: Request, res: Response) => {
       commentCount: row.comment_count || 0,
       lastProfiledAt: row.last_profiled_at,
       isBookmarked: row.is_bookmarked || false,
+      piiDetected: row.pii_detected || false,
     }));
 
     const payload = { assets: items, pagination: { page, limit, total: t, totalPages } };
@@ -871,12 +878,15 @@ const getAsset = async (req: Request, res: Response) => {
     const userId = (req as any).user?.id || 'system';
     const { rows } = await cpdb.query(
       `SELECT a.*,
+              ds.name as "dataSourceName",
+              ds.type as "dataSourceType",
               jsonb_agg(c ORDER BY c.ordinal) AS columns,
               EXISTS(SELECT 1 FROM catalog_bookmarks WHERE object_id = a.id AND user_id = $2) as is_bookmarked
        FROM catalog_assets a
+       LEFT JOIN data_sources ds ON ds.id = a.datasource_id
        LEFT JOIN catalog_columns c ON c.asset_id = a.id
        WHERE a.id::text = $1
-       GROUP BY a.id`,
+       GROUP BY a.id, ds.name, ds.type`,
       [req.params.id, userId]
     );
     if (!rows[0]) return fail(res, 404, 'Not found');
@@ -1032,7 +1042,7 @@ router.post('/catalog/assets/:id/profile', async (req, res) => {
 
     // Quick row count - try to get it directly
     try {
-      const { ConnectorFactory } = require('../services/connectors/factory');
+      const ConnectorFactory = require('../services/connectors/factory').default;
       const connector = await ConnectorFactory.createConnector(config);
 
       let rowCount = null;
@@ -1114,13 +1124,32 @@ router.get('/catalog/search', async (req, res) => {
 // Lineage
 router.get('/catalog/assets/:id/lineage', async (req, res) => {
   try {
-    const id = String(req.params.id);
-    const { rows } = await cpdb.query(
-      `SELECT upstream_asset_id, downstream_asset_id, edge_type, confidence
-       FROM catalog_edges
-       WHERE upstream_asset_id=$1 OR downstream_asset_id=$1`, [id]
+    const assetId = String(req.params.id);
+
+    // Get upstream dependencies (sources that feed this asset) with column details
+    const { rows: upstreamRows } = await cpdb.query(
+      `SELECT ca.id, ca.table_name as name, ca.table_name, ca.schema_name as schema,
+              ca.asset_type as type, ca.database_name, cl.metadata, cl.edge_type
+       FROM catalog_lineage cl
+       JOIN catalog_assets ca ON ca.id = cl.from_asset_id
+       WHERE cl.to_asset_id = $1::bigint`,
+      [assetId]
     );
-    ok(res, { edges: rows });
+
+    // Get downstream dependencies (assets that use this one) with column details
+    const { rows: downstreamRows } = await cpdb.query(
+      `SELECT ca.id, ca.table_name as name, ca.table_name, ca.schema_name as schema,
+              ca.asset_type as type, ca.database_name, cl.metadata, cl.edge_type
+       FROM catalog_lineage cl
+       JOIN catalog_assets ca ON ca.id = cl.to_asset_id
+       WHERE cl.from_asset_id = $1::bigint`,
+      [assetId]
+    );
+
+    ok(res, {
+      upstream: upstreamRows,
+      downstream: downstreamRows
+    });
   } catch (e: any) {
     fail(res, 500, e.message);
   }
@@ -1322,6 +1351,540 @@ router.post('/catalog/assets/:id/rate', async (req: Request, res: Response) => {
       rating,
       avgRating: Number(avgRating),
       ratingCount: Number(ratingCount)
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Get asset columns
+router.get('/catalog/assets/:id/columns', async (req: Request, res: Response) => {
+  try {
+    const assetId = req.params.id;
+
+    // First get all columns
+    const { rows } = await cpdb.query(
+      `SELECT
+        id,
+        column_name,
+        data_type,
+        is_nullable,
+        ordinal,
+        description,
+        is_primary_key,
+        is_foreign_key,
+        foreign_key_table,
+        foreign_key_column,
+        data_classification,
+        sample_values,
+        value_distribution,
+        null_percentage,
+        unique_percentage,
+        min_value,
+        max_value,
+        avg_value,
+        profile_json,
+        pii_type,
+        is_sensitive
+       FROM catalog_columns
+       WHERE asset_id = $1::bigint
+       ORDER BY ordinal ASC, column_name ASC`,
+      [assetId]
+    );
+
+    // Get quality issues for this asset
+    const { rows: qualityIssuesRows } = await cpdb.query(
+      `SELECT
+        qi.id,
+        qi.title,
+        qi.description,
+        qi.severity,
+        qi.status,
+        qi.dimension,
+        qi.affected_rows,
+        qi.created_at,
+        qi.sample_data
+       FROM quality_issues qi
+       WHERE qi.asset_id = $1::bigint
+         AND qi.status IN ('open', 'acknowledged')
+       ORDER BY qi.created_at DESC`,
+      [assetId]
+    );
+
+    // Attach quality issues to columns based on column name mentioned in title/description
+    const columnsWithIssues = rows.map(column => {
+      const relatedIssues = qualityIssuesRows.filter(issue => {
+        const columnName = column.column_name.toLowerCase();
+        const titleLower = (issue.title || '').toLowerCase();
+        const descLower = (issue.description || '').toLowerCase();
+
+        // Check if column name appears in title or description
+        // Match patterns: "column_name", .column_name, table.column_name, "column.name"
+        return titleLower.includes(columnName) ||
+               descLower.includes(`"${columnName}"`) ||
+               descLower.includes(`.${columnName}`) ||
+               descLower.includes(`"${columnName.replace(/_/g, '.')}"`) ||
+               // Also check without quotes or dots for broader matching
+               descLower.includes(columnName);
+      }).map(issue => ({
+        id: issue.id,
+        issue_type: issue.title,
+        severity: issue.severity,
+        description: issue.description,
+        affected_rows: parseInt(issue.affected_rows) || 0,
+        fix_script: null // Fix script will be extracted from description if it contains one
+      }));
+
+      return {
+        ...column,
+        quality_issues: relatedIssues
+      };
+    });
+
+    ok(res, columnsWithIssues);
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Get real sample data from source table for a specific column
+router.get('/catalog/columns/:columnId/real-samples', async (req: Request, res: Response) => {
+  try {
+    const columnId = req.params.columnId;
+    const issueType = req.query.issue_type as string;
+    const limit = parseInt(req.query.limit as string) || 5;
+
+    // Get column metadata including asset info
+    const { rows: columnRows } = await cpdb.query(
+      `SELECT
+        cc.column_name,
+        cc.data_type,
+        cc.data_classification,
+        ca.table_name,
+        ca.schema_name,
+        ca.datasource_id,
+        ds.type as datasource_type,
+        ds.connection_config
+       FROM catalog_columns cc
+       JOIN catalog_assets ca ON ca.id = cc.asset_id
+       JOIN data_sources ds ON ds.id = ca.datasource_id
+       WHERE cc.id = $1`,
+      [columnId]
+    );
+
+    if (columnRows.length === 0) {
+      return fail(res, 404, 'Column not found');
+    }
+
+    const column = columnRows[0];
+    const { table_name, schema_name, column_name, data_classification, datasource_type, connection_config } = column;
+
+    // Only support postgresql for now
+    if (datasource_type !== 'postgresql') {
+      return ok(res, {
+        bad_samples: [],
+        good_samples: [],
+        message: 'Real sample data only supported for PostgreSQL sources'
+      });
+    }
+
+    // Decrypt connection config if needed
+    let cfg = connection_config;
+    if (typeof cfg === 'string') {
+      try {
+        cfg = JSON.parse(cfg);
+      } catch {
+        return fail(res, 500, 'Invalid connection config');
+      }
+    }
+    if (isEncryptedConfig(cfg)) {
+      cfg = decryptConfig(cfg);
+    }
+
+    // Connect to source database
+    const { Client: PgClient } = require('pg');
+    const sourceClient = new PgClient({
+      host: cfg.host,
+      port: cfg.port || 5432,
+      user: cfg.user || cfg.username,
+      password: cfg.password,
+      database: cfg.database,
+      ssl: cfg.ssl ? { rejectUnauthorized: false } : undefined,
+    });
+
+    await sourceClient.connect();
+
+    let badSamples: any[] = [];
+    let goodSamples: any[] = [];
+
+    try {
+      // Fetch real samples based on issue type
+      if (issueType === 'null_values') {
+        // Get rows with NULL values
+        const nullQuery = `SELECT "${column_name}" FROM "${schema_name}"."${table_name}" WHERE "${column_name}" IS NULL LIMIT ${limit}`;
+        const nullResult = await sourceClient.query(nullQuery);
+        badSamples = nullResult.rows.map((r: any) => null);
+
+        // Get rows with non-NULL values as good examples
+        const nonNullQuery = `SELECT "${column_name}" FROM "${schema_name}"."${table_name}" WHERE "${column_name}" IS NOT NULL LIMIT ${limit}`;
+        const nonNullResult = await sourceClient.query(nonNullQuery);
+        goodSamples = nonNullResult.rows.map((r: any) => r[column_name]);
+
+      } else if (issueType === 'duplicate_values') {
+        // Get actual duplicate values with counts
+        const dupQuery = `
+          SELECT "${column_name}", COUNT(*) as count
+          FROM "${schema_name}"."${table_name}"
+          GROUP BY "${column_name}"
+          HAVING COUNT(*) > 1
+          ORDER BY COUNT(*) DESC
+          LIMIT ${limit}`;
+        const dupResult = await sourceClient.query(dupQuery);
+        badSamples = dupResult.rows.map((r: any) => ({
+          value: r[column_name],
+          count: parseInt(r.count)
+        }));
+
+        // Get unique values as good examples
+        const uniqueQuery = `
+          SELECT "${column_name}", COUNT(*) as count
+          FROM "${schema_name}"."${table_name}"
+          GROUP BY "${column_name}"
+          HAVING COUNT(*) = 1
+          LIMIT ${limit}`;
+        const uniqueResult = await sourceClient.query(uniqueQuery);
+        goodSamples = uniqueResult.rows.map((r: any) => r[column_name]);
+
+      } else if (issueType === 'pii_unencrypted' || issueType === 'pii_detected') {
+        // Get sample PII values (will be masked in frontend)
+        const piiQuery = `SELECT "${column_name}" FROM "${schema_name}"."${table_name}" WHERE "${column_name}" IS NOT NULL LIMIT ${limit}`;
+        const piiResult = await sourceClient.query(piiQuery);
+        badSamples = piiResult.rows.map((r: any) => r[column_name]);
+
+        // Good examples would be encrypted/hashed versions
+        goodSamples = badSamples.map(() => '\\x' + Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join(''));
+
+      } else {
+        // Default: just get sample values
+        const sampleQuery = `SELECT "${column_name}" FROM "${schema_name}"."${table_name}" WHERE "${column_name}" IS NOT NULL LIMIT ${limit}`;
+        const sampleResult = await sourceClient.query(sampleQuery);
+        badSamples = sampleResult.rows.map((r: any) => r[column_name]);
+        goodSamples = [];
+      }
+
+    } finally {
+      await sourceClient.end();
+    }
+
+    ok(res, {
+      bad_samples: badSamples,
+      good_samples: goodSamples,
+      column_name: column_name,
+      data_type: column.data_type,
+      data_classification: data_classification
+    });
+
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Debug endpoint to check lineage data
+router.get('/catalog/lineage/debug', async (req: Request, res: Response) => {
+  try {
+    const { rows: countRows } = await cpdb.query('SELECT COUNT(*) as count FROM catalog_lineage');
+    const { rows: sampleRows } = await cpdb.query('SELECT * FROM catalog_lineage LIMIT 10');
+
+    ok(res, {
+      total_count: countRows[0]?.count || 0,
+      sample_data: sampleRows
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Populate lineage from foreign keys
+router.post('/catalog/lineage/populate', async (req: Request, res: Response) => {
+  try {
+    // First try to get FK relationships from catalog_columns
+    const { rows: fkRows } = await cpdb.query(`
+      SELECT DISTINCT
+        cc.asset_id as from_asset_id,
+        ca_target.id as to_asset_id,
+        cc.foreign_key_table,
+        cc.foreign_key_column
+      FROM catalog_columns cc
+      JOIN catalog_assets ca_source ON ca_source.id = cc.asset_id
+      JOIN catalog_assets ca_target ON
+        ca_target.table_name = cc.foreign_key_table AND
+        ca_target.schema_name = ca_source.schema_name
+      WHERE cc.is_foreign_key = true
+        AND cc.foreign_key_table IS NOT NULL
+    `);
+
+    let inserted = 0;
+
+    // If no FK relationships found, create some sample lineage for demo
+    if (fkRows.length === 0) {
+      // Get some assets to create sample lineage
+      const { rows: assets } = await cpdb.query(`
+        SELECT id, table_name FROM catalog_assets
+        WHERE schema_name = 'public'
+        ORDER BY id
+        LIMIT 20
+      `);
+
+      if (assets.length >= 2) {
+        // Create some logical relationships for common patterns
+        const relationships = [
+          // asset_ratings -> assets
+          { from: 'asset_ratings', to: 'assets', type: 'foreign_key' },
+          // asset_bookmarks -> assets
+          { from: 'asset_bookmarks', to: 'assets', type: 'foreign_key' },
+          // asset_comments -> assets
+          { from: 'asset_comments', to: 'assets', type: 'foreign_key' },
+          // asset_followers -> assets
+          { from: 'asset_followers', to: 'assets', type: 'foreign_key' },
+          // asset_usage_stats -> assets
+          { from: 'asset_usage_stats', to: 'assets', type: 'foreign_key' },
+          // asset_documentation -> assets
+          { from: 'asset_documentation', to: 'assets', type: 'foreign_key' },
+        ];
+
+        for (const rel of relationships) {
+          const fromAsset = assets.find(a => a.table_name === rel.from);
+          const toAsset = assets.find(a => a.table_name === rel.to);
+
+          if (fromAsset && toAsset) {
+            try {
+              // Check if already exists
+              const { rows: existing } = await cpdb.query(`
+                SELECT id FROM catalog_lineage
+                WHERE from_asset_id = $1 AND to_asset_id = $2 AND edge_type = $3
+              `, [fromAsset.id, toAsset.id, rel.type]);
+
+              if (existing.length === 0) {
+                await cpdb.query(`
+                  INSERT INTO catalog_lineage (tenant_id, from_asset_id, to_asset_id, edge_type, created_at)
+                  VALUES (1, $1, $2, $3, NOW())
+                `, [fromAsset.id, toAsset.id, rel.type]);
+                inserted++;
+              }
+            } catch (err) {
+              console.error('Failed to insert lineage:', err);
+            }
+          }
+        }
+      }
+
+      return ok(res, {
+        message: 'Sample lineage data created for demonstration',
+        inserted: inserted
+      });
+    }
+
+    // Insert lineage records from actual FK relationships
+    for (const fk of fkRows) {
+      try {
+        // Check if already exists
+        const { rows: existing } = await cpdb.query(`
+          SELECT id FROM catalog_lineage
+          WHERE from_asset_id = $1 AND to_asset_id = $2 AND edge_type = 'foreign_key'
+        `, [fk.from_asset_id, fk.to_asset_id]);
+
+        if (existing.length === 0) {
+          await cpdb.query(`
+            INSERT INTO catalog_lineage (tenant_id, from_asset_id, to_asset_id, edge_type, created_at)
+            VALUES (1, $1, $2, 'foreign_key', NOW())
+          `, [fk.from_asset_id, fk.to_asset_id]);
+          inserted++;
+        }
+      } catch (err) {
+        console.error('Failed to insert lineage:', err);
+      }
+    }
+
+    ok(res, {
+      message: 'Lineage populated from foreign keys',
+      found_relationships: fkRows.length,
+      inserted: inserted
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Manually add lineage relationship
+router.post('/catalog/lineage/add', async (req: Request, res: Response) => {
+  try {
+    const { from_asset_id, to_asset_id, edge_type } = req.body;
+
+    if (!from_asset_id || !to_asset_id) {
+      return fail(res, 400, 'from_asset_id and to_asset_id are required');
+    }
+
+    // Check if already exists
+    const { rows: existing } = await cpdb.query(`
+      SELECT id FROM catalog_lineage
+      WHERE from_asset_id = $1 AND to_asset_id = $2 AND edge_type = $3
+    `, [from_asset_id, to_asset_id, edge_type || 'derived']);
+
+    if (existing.length > 0) {
+      return ok(res, { message: 'Lineage already exists', id: existing[0].id });
+    }
+
+    const { rows } = await cpdb.query(`
+      INSERT INTO catalog_lineage (tenant_id, from_asset_id, to_asset_id, edge_type, created_at)
+      VALUES (1, $1, $2, $3, NOW())
+      RETURNING id
+    `, [from_asset_id, to_asset_id, edge_type || 'derived']);
+
+    ok(res, { message: 'Lineage created', id: rows[0].id });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Delete lineage relationship
+router.delete('/catalog/lineage/:id', async (req: Request, res: Response) => {
+  try {
+    const lineageId = req.params.id;
+
+    const { rows } = await cpdb.query(`
+      DELETE FROM catalog_lineage WHERE id = $1 RETURNING id
+    `, [lineageId]);
+
+    if (rows.length === 0) {
+      return fail(res, 404, 'Lineage not found');
+    }
+
+    ok(res, { message: 'Lineage deleted', id: lineageId });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Discover lineage for a data source (automatic production-level discovery)
+router.post('/catalog/lineage/discover/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+    const { clearExisting } = req.body;
+
+    const lineageService = new LineageDiscoveryService(1); // tenant_id = 1
+
+    // Optionally clear existing lineage first
+    if (clearExisting) {
+      await lineageService.clearLineageForDataSource(dataSourceId);
+    }
+
+    // Discover lineage relationships
+    const inserted = await lineageService.discoverLineageForDataSource(dataSourceId);
+
+    ok(res, {
+      message: 'Lineage discovery completed',
+      dataSourceId,
+      relationshipsDiscovered: inserted
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Discover lineage using heuristics (for NoSQL/databases without FKs)
+router.post('/catalog/lineage/discover-heuristic/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+
+    const heuristicService = new HeuristicLineageService(1);
+    const result = await heuristicService.discoverHeuristicLineage(dataSourceId);
+
+    ok(res, {
+      message: 'Heuristic lineage discovery completed',
+      dataSourceId,
+      relationshipsDiscovered: result.discovered,
+      totalHints: result.hints.length,
+      topHints: result.hints.slice(0, 10) // Return top 10 hints
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Get lineage hints without committing (for review)
+router.get('/catalog/lineage/hints/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+
+    const heuristicService = new HeuristicLineageService(1);
+    const hints = await heuristicService.getLineageHints(dataSourceId);
+
+    ok(res, {
+      dataSourceId,
+      totalHints: hints.length,
+      hints: hints.map(h => ({
+        from_asset_id: h.from_asset_id,
+        to_asset_id: h.to_asset_id,
+        from_column: h.from_column,
+        to_column: h.to_column,
+        confidence: h.confidence_score,
+        method: h.discovery_method,
+        reasoning: h.reasoning
+      }))
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// SIMPLE lineage discovery - just works!
+router.post('/catalog/lineage/discover-simple/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+
+    const simpleService = new SimpleLineageService(1);
+    const discovered = await simpleService.discoverAll(dataSourceId);
+
+    ok(res, {
+      message: 'Simple lineage discovery completed',
+      dataSourceId,
+      relationshipsDiscovered: discovered
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// ENHANCED lineage discovery - smarter pattern matching
+router.post('/catalog/lineage/discover-enhanced/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+
+    const enhancedService = new EnhancedLineageService(1);
+    const discovered = await enhancedService.discoverAll(dataSourceId);
+
+    ok(res, {
+      message: 'Enhanced lineage discovery completed',
+      dataSourceId,
+      relationshipsDiscovered: discovered
+    });
+  } catch (e: any) {
+    fail(res, 500, e.message);
+  }
+});
+
+// Populate FK metadata for existing catalog
+router.post('/catalog/fk-metadata/populate/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+
+    const fkService = new FKMetadataService();
+    const updated = await fkService.populateFKMetadata(dataSourceId);
+
+    ok(res, {
+      message: 'FK metadata population completed',
+      dataSourceId,
+      columnsUpdated: updated
     });
   } catch (e: any) {
     fail(res, 500, e.message);
@@ -1533,6 +2096,25 @@ router.post('/data-sources/:id/sync', async (req: Request, res: Response) => {
             `UPDATE data_sources SET last_sync_at = now(), updated_at = now() WHERE id::text = $1`,
             [id]
           );
+
+          // Auto-discover lineage after sync completes
+          try {
+            console.log(`[lineage] Auto-discovering lineage for data source: ${id}`);
+            // Use enhanced lineage service for better pattern matching
+            const lineageService = new EnhancedLineageService(tenantId);
+            const discovered = await lineageService.discoverAll(id);
+            console.log(`[lineage] Discovered ${discovered} relationships for data source: ${id}`);
+          } catch (err) {
+            console.error('[lineage] Auto-discovery failed:', err);
+            // Fallback to simple service if enhanced fails
+            try {
+              const simpleService = new SimpleLineageService(tenantId);
+              const discovered = await simpleService.discoverAll(id);
+              console.log(`[lineage] Simple discovery found ${discovered} relationships for data source: ${id}`);
+            } catch (err2) {
+              console.error('[lineage] Simple discovery also failed:', err2);
+            }
+          }
         })
         .catch((e) => console.error('[data-service] async sync failed', e));
       return;
@@ -1546,7 +2128,27 @@ router.post('/data-sources/:id/sync', async (req: Request, res: Response) => {
       [id]
     );
 
-    ok(res, { ...result, syncId: `sync_${Date.now()}_${id}` });
+    // Auto-discover lineage after sync completes
+    let lineageCount = 0;
+    try {
+      console.log(`[lineage] Auto-discovering lineage for data source: ${id}`);
+      // Use enhanced lineage service for better pattern matching
+      const lineageService = new EnhancedLineageService(tenantId);
+      lineageCount = await lineageService.discoverAll(id);
+      console.log(`[lineage] Enhanced discovery found ${lineageCount} relationships for data source: ${id}`);
+    } catch (err) {
+      console.error('[lineage] Enhanced discovery failed:', err);
+      // Fallback to simple service
+      try {
+        const simpleService = new SimpleLineageService(tenantId);
+        lineageCount = await simpleService.discoverAll(id);
+        console.log(`[lineage] Simple discovery found ${lineageCount} relationships for data source: ${id}`);
+      } catch (err2) {
+        console.error('[lineage] Simple discovery also failed:', err2);
+      }
+    }
+
+    ok(res, { ...result, syncId: `sync_${Date.now()}_${id}`, lineageDiscovered: lineageCount });
   } catch (e: any) {
     fail(res, 500, e.message);
   }
@@ -1624,10 +2226,452 @@ router.get('/catalog/summary', async (req: Request, res: Response) => {
 /* These ensure the FE can call either /api/catalog/assets or /api/assets */
 // IMPORTANT: List and export routes (no :id) must come before /:id routes
 router.get('/catalog/databases', getAllDatabases);
+// Add database listing by data source ID
+router.get('/catalog/databases/:dataSourceId', async (req: Request, res: Response) => {
+  req.query.dataSourceId = req.params.dataSourceId;
+  return getAllDatabases(req, res);
+});
 router.get('/catalog/assets/export', exportAssets);
 router.get('/assets/export', exportAssets);
 router.get('/catalog/assets', listAssets);
 router.get('/assets', listAssets);
+
+// Execute query endpoint for data preview
+router.post('/data/execute-query', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId, database, query } = req.body;
+
+    if (!dataSourceId || !query) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: dataSourceId and query',
+      });
+    }
+
+    console.log('[ExecuteQuery] Request:', { dataSourceId, database, query: query.substring(0, 100) + '...' });
+
+    // Get data source configuration
+    const dsResult = await cpdb.query(
+      'SELECT * FROM data_sources WHERE id = $1',
+      [dataSourceId]
+    );
+
+    if (dsResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Data source not found',
+      });
+    }
+
+    const dataSource = dsResult.rows[0];
+    const config = dataSource.connection_config || {};
+
+    // Create connector
+    const { ConnectorFactory } = await import('../services/connectors');
+    const connector = ConnectorFactory.createConnector({
+      type: dataSource.type,
+      host: config.host || dataSource.host,
+      port: config.port || dataSource.port,
+      database: database || config.database || dataSource.database_name,
+      username: config.username || dataSource.username,
+      password: config.password || dataSource.password,
+      ...config,
+    });
+
+    // Use database-specific limit syntax
+    let finalQuery = query;
+    const hasLimit = query.trim().toLowerCase().match(/limit\s+\d+|rownum\s*<=\s*\d+|top\s+\d+|fetch\s+first/i);
+
+    if (!hasLimit) {
+      const cleanQuery = query.replace(/;?\s*$/, '');
+      const dbType = dataSource.type.toLowerCase();
+
+      if (dbType.includes('oracle')) {
+        finalQuery = `${cleanQuery} AND ROWNUM <= 100`;
+      } else if (dbType.includes('sqlserver') || dbType.includes('mssql')) {
+        if (cleanQuery.trim().toLowerCase().startsWith('select')) {
+          finalQuery = cleanQuery.replace(/^select\s+/i, 'SELECT TOP 100 ');
+        } else {
+          finalQuery = `${cleanQuery} OFFSET 0 ROWS FETCH FIRST 100 ROWS ONLY`;
+        }
+      } else {
+        // PostgreSQL, MySQL, Snowflake, Redshift
+        finalQuery = `${cleanQuery} LIMIT 100`;
+      }
+    }
+
+    console.log('[ExecuteQuery] Executing query for', dataSource.type, ':', finalQuery.substring(0, 150) + '...');
+
+    const result = await connector.executeQuery(finalQuery);
+
+    console.log('[ExecuteQuery] Query result:', {
+      rowCount: result.rows.length,
+      columnCount: result.rows[0] ? Object.keys(result.rows[0]).length : 0,
+    });
+
+    res.json({
+      success: true,
+      rows: result.rows || [],
+      rowCount: result.rows.length,
+    });
+
+  } catch (error: any) {
+    console.error('[ExecuteQuery] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to execute query',
+    });
+  }
+});
+
+/* ---------------------------- PII Classification ---------------------------- */
+
+// Classify column as PII (manual override for ML training)
+router.post('/pii/classify', async (req: Request, res: Response) => {
+  try {
+    const {
+      dataSourceId,
+      databaseName,
+      schemaName,
+      tableName,
+      columnName,
+      dataType,
+      isPII,
+      piiType,
+      reason,
+      userId = 'system',
+    } = req.body;
+
+    if (!dataSourceId || !databaseName || !schemaName || !tableName || !columnName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields',
+      });
+    }
+
+    const { SmartPIIDetectionService } = await import('../services/SmartPIIDetectionService');
+    const piiService = new SmartPIIDetectionService(cpdb);
+
+    await piiService.storeManualClassification(
+      {
+        databaseName,
+        schemaName,
+        tableName,
+        columnName,
+        dataType: dataType || 'unknown',
+      },
+      isPII,
+      piiType,
+      userId,
+      reason
+    );
+
+    // Update catalog_columns with the manual classification
+    await cpdb.query(
+      `UPDATE catalog_columns
+       SET pii_type = $1, is_sensitive = $2
+       WHERE datasource_id = $3
+         AND database_name = $4
+         AND schema_name = $5
+         AND table_name = $6
+         AND column_name = $7`,
+      [piiType, isPII, dataSourceId, databaseName, schemaName, tableName, columnName]
+    );
+
+    res.json({
+      success: true,
+      message: 'PII classification saved successfully',
+    });
+  } catch (error: any) {
+    console.error('[PIIClassify] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to classify PII',
+    });
+  }
+});
+
+// Get PII detection for a table with actual data content analysis
+router.post('/pii/detect', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId, databaseName, schemaName, tableName } = req.body;
+
+    if (!dataSourceId || !databaseName || !schemaName || !tableName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields',
+      });
+    }
+
+    // Get data source configuration
+    const dsResult = await cpdb.query(
+      'SELECT * FROM data_sources WHERE id = $1',
+      [dataSourceId]
+    );
+
+    if (dsResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Data source not found',
+      });
+    }
+
+    const dataSource = dsResult.rows[0];
+    let config = dataSource.connection_config || {};
+
+    // Parse connection_config if it's a string
+    if (typeof config === 'string') {
+      try {
+        config = JSON.parse(config);
+      } catch (e) {
+        console.error('[PIIDetect] Failed to parse connection_config:', e);
+      }
+    }
+
+    console.log('[PIIDetect] Data source:', {
+      id: dataSource.id,
+      type: dataSource.type,
+      name: dataSource.name,
+      configKeys: Object.keys(config),
+    });
+
+    // Get columns for the table by joining with catalog_assets
+    const columnsResult = await cpdb.query(
+      `SELECT cc.column_name, cc.data_type, cc.ordinal
+       FROM catalog_columns cc
+       JOIN catalog_assets ca ON cc.asset_id = ca.id
+       WHERE ca.datasource_id = $1
+         AND ca.schema_name = $2
+         AND ca.table_name = $3
+       ORDER BY cc.ordinal`,
+      [dataSourceId, schemaName, tableName]
+    );
+
+    if (columnsResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No columns found for this table',
+      });
+    }
+
+    // Create connector to fetch sample data
+    const ConnectorFactory = (await import('../services/connectors/factory')).default;
+    const connector = ConnectorFactory.createConnector({
+      type: dataSource.type,
+      host: config.host || dataSource.host,
+      port: config.port || dataSource.port,
+      database: databaseName || config.database || dataSource.database_name,
+      username: config.username || dataSource.username,
+      password: config.password || dataSource.password,
+      ...config,
+    });
+
+    // Fetch sample data (100 rows) for analysis
+    const fullTableName = schemaName ? `"${schemaName}"."${tableName}"` : `"${tableName}"`;
+    const sampleQuery = `SELECT * FROM ${fullTableName} LIMIT 100`;
+
+    console.log('[PIIDetect] Fetching sample data:', sampleQuery);
+
+    const sampleData = await connector.executeQuery(sampleQuery);
+
+    // Extract sample values for each column
+    const columnSamples = new Map<string, any[]>();
+
+    for (const row of sampleData.rows) {
+      for (const col of columnsResult.rows) {
+        if (!columnSamples.has(col.column_name)) {
+          columnSamples.set(col.column_name, []);
+        }
+        columnSamples.get(col.column_name)!.push(row[col.column_name]);
+      }
+    }
+
+    const { SmartPIIDetectionService } = await import('../services/SmartPIIDetectionService');
+    const piiService = new SmartPIIDetectionService(cpdb);
+
+    // Detect PII with actual data samples
+    const results = await piiService.batchDetectPII(
+      columnsResult.rows.map((col) => ({
+        databaseName,
+        schemaName,
+        tableName,
+        columnName: col.column_name,
+        dataType: col.data_type,
+        sampleValues: columnSamples.get(col.column_name) || [],
+      }))
+    );
+
+    console.log('[PIIDetect] Detection results:', {
+      table: `${schemaName}.${tableName}`,
+      totalColumns: results.length,
+      piiColumns: results.filter(r => r.isPII).length,
+    });
+
+    res.json({
+      success: true,
+      columns: results,
+      sampleSize: sampleData.rows.length,
+    });
+  } catch (error: any) {
+    console.error('[PIIDetect] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to detect PII',
+    });
+  }
+});
+
+// Get PII detection statistics
+router.get('/pii/stats/:dataSourceId', async (req: Request, res: Response) => {
+  try {
+    const { dataSourceId } = req.params;
+
+    const { SmartPIIDetectionService } = await import('../services/SmartPIIDetectionService');
+    const piiService = new SmartPIIDetectionService(cpdb);
+
+    const stats = await piiService.getDetectionStats(dataSourceId);
+
+    res.json({
+      success: true,
+      stats,
+    });
+  } catch (error: any) {
+    console.error('[PIIStats] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get PII stats',
+    });
+  }
+});
+
+/**
+ * PATCH /api/catalog/columns/:id
+ * Update column metadata (for manual PII classification)
+ */
+router.patch('/catalog/columns/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { pii_type, data_classification, is_sensitive } = req.body;
+
+    console.log(`[PATCH /catalog/columns/${id}] Updating column with:`, { pii_type, data_classification, is_sensitive });
+
+    // Get column details BEFORE update (to check if PII is being newly applied)
+    const { rows: beforeRows } = await cpdb.query(
+      `SELECT cc.id, cc.column_name, cc.pii_type, cc.asset_id,
+              ca.datasource_id, ca.database_name, ca.schema_name, ca.table_name
+       FROM catalog_columns cc
+       JOIN catalog_assets ca ON ca.id = cc.asset_id
+       WHERE cc.id = $1`,
+      [id]
+    );
+
+    if (beforeRows.length === 0) {
+      return fail(res, 404, 'Column not found');
+    }
+
+    const columnBefore = beforeRows[0];
+    const wasNotPII = !columnBefore.pii_type;
+    const isNowPII = !!pii_type;
+
+    // Build dynamic update query
+    const updates: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+
+    if (pii_type !== undefined) {
+      updates.push(`pii_type = $${paramIndex++}`);
+      values.push(pii_type);
+    }
+
+    if (data_classification !== undefined) {
+      updates.push(`data_classification = $${paramIndex++}`);
+      values.push(data_classification);
+    }
+
+    if (typeof is_sensitive === 'boolean') {
+      updates.push(`is_sensitive = $${paramIndex++}`);
+      values.push(is_sensitive);
+    }
+
+    if (updates.length === 0) {
+      return fail(res, 400, 'No fields to update');
+    }
+
+    updates.push(`updated_at = CURRENT_TIMESTAMP`);
+    values.push(id);
+
+    const query = `
+      UPDATE catalog_columns
+      SET ${updates.join(', ')}
+      WHERE id = $${paramIndex}
+      RETURNING id, column_name, pii_type, data_classification, is_sensitive
+    `;
+
+    const { rows } = await cpdb.query(query, values);
+
+    if (rows.length === 0) {
+      return fail(res, 404, 'Column not found');
+    }
+
+    console.log(`[PATCH /catalog/columns/${id}] Successfully updated:`, rows[0]);
+
+    // If user manually marked column as PII, create quality issue based on rule requirements
+    if (wasNotPII && isNowPII && pii_type) {
+      console.log(`[PATCH /catalog/columns/${id}] Column marked as PII - creating quality issue...`);
+
+      // Get PII rule configuration
+      const { rows: ruleRows } = await cpdb.query(
+        `SELECT pii_type, display_name, sensitivity_level, requires_encryption, requires_masking
+         FROM pii_rule_definitions
+         WHERE pii_type = $1`,
+        [pii_type]
+      );
+
+      if (ruleRows.length > 0) {
+        const rule = ruleRows[0];
+
+        try {
+          // Create quality issue using PIIQualityIntegration
+          const piiIntegration = new PIIQualityIntegration(cpdb);
+
+          const violation: PIIViolation = {
+            columnId: id,
+            assetId: String(columnBefore.asset_id),
+            dataSourceId: columnBefore.datasource_id,
+            databaseName: columnBefore.database_name,
+            schemaName: columnBefore.schema_name,
+            tableName: columnBefore.table_name,
+            columnName: columnBefore.column_name,
+            piiType: rule.pii_type,
+            piiDisplayName: rule.display_name,
+            sensitivityLevel: rule.sensitivity_level,
+            matchCount: 1,
+            sampleMatches: [],
+            complianceFlags: [],
+            requiresEncryption: rule.requires_encryption,
+            requiresMasking: rule.requires_masking,
+            recommendation: rule.requires_encryption
+              ? 'Apply encryption to this column immediately'
+              : 'Consider masking this field in UI displays',
+          };
+
+          await piiIntegration.createQualityIssueForPIIViolation(violation);
+          console.log(`[PATCH /catalog/columns/${id}] ✅ Created quality issue for ${rule.pii_type} PII`);
+        } catch (issueError) {
+          console.error(`[PATCH /catalog/columns/${id}] Failed to create quality issue:`, issueError);
+          // Don't fail the whole request if quality issue creation fails
+        }
+      } else {
+        console.log(`[PATCH /catalog/columns/${id}] ⚠️  PII rule not found for type: ${pii_type}`);
+      }
+    }
+
+    ok(res, rows[0]);
+  } catch (error: any) {
+    console.error('[PATCH /catalog/columns/:id] Error:', error);
+    fail(res, 500, error.message || 'Failed to update column');
+  }
+});
 
 // General asset detail route (must come AFTER all specific /assets/:id/* routes)
 router.get('/catalog/assets/:id', getAsset);

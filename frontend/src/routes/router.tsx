@@ -61,6 +61,7 @@ const DataSources   = lazyPage('DataSources');
 const Governance    = lazyPage('Governance');
 const Monitoring    = lazyPage('Monitoring');
 const Settings      = lazyPage('Settings');
+const PIISettings   = lazyPage('PIISettings');
 const Users         = lazyPage('Users');
 const NotFound      = lazyPage('NotFound');
 
@@ -140,6 +141,7 @@ const routes: RouteObject[] = [
       { path: 'governance',      element: withSuspense(<Governance />) },
       { path: 'monitoring',      element: withSuspense(<Monitoring />) },
       { path: 'settings',        element: withSuspense(<Settings />) },
+      { path: 'pii-settings',    element: withSuspense(<PIISettings />) },
       {path: 'users',            element: withSuspense(<Users />) },
       { path: '*',               element: withSuspense(<NotFound />) },
     ],

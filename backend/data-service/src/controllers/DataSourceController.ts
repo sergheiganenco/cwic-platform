@@ -411,7 +411,18 @@ testConfig = async (req: Request, res: Response) => {
       const { id } = req.params;
       const { force = false } = req.body ?? {};
 
+      logger.info(`[SYNC] Starting sync for data source: ${id}`);
+
       const result = await this.dataSourceService.syncDataSource(id, { force: !!force });
+
+      logger.info(`[SYNC] Sync completed, updating lastSyncAt for: ${id}`);
+
+      // Update lastSyncAt timestamp
+      await this.dataSourceService.updateDataSource(id, {
+        lastSyncAt: new Date(),
+      });
+
+      logger.info(`[SYNC] lastSyncAt updated successfully for: ${id}`);
 
       const normalizedStatus: 'queued' | 'started' | 'running' | 'completed' | 'failed' =
         (result as any)?.status ??
@@ -431,10 +442,23 @@ testConfig = async (req: Request, res: Response) => {
 
       res.json({ success: true, data: payload });
     } catch (error) {
-      logger.error('Error syncing data source:', error);
+      logger.error('[SYNC] Error syncing data source:', error);
+
+      // Improve error messaging for common Azure SQL issues
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      let userMessage = 'Failed to sync data source';
+
+      if (errorMsg.includes('not allowed to access the server') || errorMsg.includes('firewall')) {
+        userMessage = 'Azure SQL firewall is blocking this connection. Add your IP address to the server\'s firewall rules in Azure Portal.';
+      } else if (errorMsg.includes('login failed') || errorMsg.includes('authentication')) {
+        userMessage = 'Authentication failed. Check your username and password.';
+      } else if (errorMsg.includes('timeout') || errorMsg.includes('ETIMEDOUT')) {
+        userMessage = 'Connection timed out. Check your network and firewall settings.';
+      }
+
       res
         .status(500)
-        .json({ success: false, error: { code: 'SYNC_ERROR', message: 'Failed to sync data source' } });
+        .json({ success: false, error: userMessage });
     }
   };
 

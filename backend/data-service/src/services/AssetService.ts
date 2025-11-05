@@ -121,12 +121,14 @@ export class AssetService {
 
       // Data query
       const dataQuery = `
-        SELECT 
+        SELECT
           a.*,
           ds.name as data_source_name,
-          ds.type as data_source_type
+          ds.type as data_source_type,
+          COALESCE(ca.pii_detected, false) as pii_detected
         FROM assets a
         LEFT JOIN data_sources ds ON a.data_source_id = ds.id
+        LEFT JOIN catalog_assets ca ON ca.table_name = a.name AND ca.datasource_id = a.data_source_id::uuid
         ${whereClause}
         ORDER BY a.updated_at DESC
         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -158,6 +160,7 @@ export class AssetService {
         createdAt: new Date(row.created_at),
         updatedAt: new Date(row.updated_at),
         metadata: row.metadata || {},
+        piiDetected: row.pii_detected || false,
       }));
 
       return {

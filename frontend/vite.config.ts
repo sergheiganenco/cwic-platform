@@ -27,6 +27,20 @@ export default defineConfig({
     strictPort: true,
     hmr: { clientPort: 3000 },  // avoid HMR trying another port
     proxy: {
+      '/api/ai': {
+        target: 'http://localhost:3003',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/ai/, '/api')
+      },
+      '/api/data/lineage': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/data\/lineage/, '/api/lineage')
+      },
+      '/catalog': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
       '/api': { target: 'http://localhost:8000', changeOrigin: true },
     },
   },

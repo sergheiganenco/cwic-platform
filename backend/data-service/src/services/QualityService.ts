@@ -232,10 +232,10 @@ export class QualityService {
     const rulesRes = await this.db.query(
       `
       SELECT id, name, description, severity, type, dialect, expression, tags,
-             enabled, created_by, updated_by, created_at, updated_at
+             enabled, is_system, parameters, created_by, updated_by, created_at, updated_at
       FROM quality_rules
       ${where}
-      ORDER BY updated_at DESC
+      ORDER BY is_system DESC, updated_at DESC
       LIMIT $${i} OFFSET $${i + 1}
       `,
       [...params, pageLimit, pageOffset],

@@ -5,6 +5,8 @@ import { useNavigate } from 'react-router-dom'
 import { DashboardOverview, KPICards, QuickActions, type Activity, type KPI } from '@components/features/dashboard'
 import { Badge } from '@components/ui/Badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@components/ui/Card'
+import { ProgressBar } from '@components/ui/ProgressBar'
+import { GradientText } from '@components/ui/GradientText'
 
 import { useAuth } from '@hooks/useAuth'
 import { useDataAssets } from '@hooks/useDataAssets'
@@ -155,6 +157,70 @@ export const Dashboard: React.FC = () => {
             onRefresh={() => window.location.reload()}
             onImport={() => navigate('/connections')}
           />
+
+          {/* Quality Trend & Distribution */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Data Quality Trend */}
+            <Card className="border-0 shadow-lg">
+              <CardHeader>
+                <CardTitle className="text-lg">
+                  <GradientText from="blue-600" to="purple-600">
+                    Data Quality Trend
+                  </GradientText>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, idx) => {
+                  const value = 85 + Math.random() * 15;
+                  return (
+                    <div key={day} className="flex items-center gap-3">
+                      <span className="text-sm font-medium text-gray-600 w-12">{day}</span>
+                      <ProgressBar
+                        value={value}
+                        color="green"
+                        height="lg"
+                        showLabel
+                        animate
+                        className="flex-1"
+                      />
+                    </div>
+                  );
+                })}
+              </CardContent>
+            </Card>
+
+            {/* Sources by Type */}
+            <Card className="border-0 shadow-lg">
+              <CardHeader>
+                <CardTitle className="text-lg">
+                  <GradientText from="green-600" to="teal-600">
+                    Sources by Type
+                  </GradientText>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {[
+                  { name: 'Relational DB', count: Math.floor(assets.length * 0.5), percentage: 50, color: 'blue' as const },
+                  { name: 'Cloud Storage', count: Math.floor(assets.length * 0.27), percentage: 27, color: 'purple' as const },
+                  { name: 'NoSQL', count: Math.floor(assets.length * 0.17), percentage: 17, color: 'green' as const },
+                  { name: 'APIs', count: Math.floor(assets.length * 0.06), percentage: 6, color: 'orange' as const },
+                ].map((source, idx) => (
+                  <div key={idx} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-gray-700">{source.name}</span>
+                      <span className="text-sm font-bold text-gray-900">{source.count} sources</span>
+                    </div>
+                    <ProgressBar
+                      value={source.percentage}
+                      color={source.color}
+                      height="md"
+                      animate
+                    />
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
 
           {/* Or, if you prefer a separate activity block below: */}
           {/* <ActivityFeed items={activities} loading={false} /> */}
