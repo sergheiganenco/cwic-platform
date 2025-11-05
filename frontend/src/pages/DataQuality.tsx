@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Clock,
   Database,
+  FileCode,
   FileSearch,
   Filter,
   Gauge,
@@ -57,6 +58,17 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@compo
 import { useDataSources } from '@hooks/useDataSources';
 import { useQualitySummary } from '@hooks/useQualitySummary';
 import { qualityAPI } from '@services/api/quality';
+import QualityOverviewRedesign from '@components/quality/QualityOverviewRedesign';
+import TechnicalOverview from '@components/quality/TechnicalOverview';
+import ProductionQualityOverview from '@components/quality/ProductionQualityOverview';
+// import ExecutiveDashboard from '@components/quality/ExecutiveDashboard'; // Not yet implemented
+import CompactProfiling from '@components/quality/CompactProfiling';
+import { QualityAutopilotOnboarding } from '@components/quality/QualityAutopilotOnboarding';
+import { RevolutionaryRulesView } from '@components/quality/revolutionary';
+import { RuleBuilder } from '@components/quality/RuleBuilder';
+import { GlobalRulesSystem } from '@components/quality/GlobalRulesSystem';
+import { SmartRulesStudio } from '@components/quality/SmartRulesStudio';
+import ModernRulesHub from '@components/quality/revolutionary/ModernRulesHub';
 import type {
   AssetProfile,
   QualityRule,
@@ -93,9 +105,18 @@ interface ProfilingProgress {
 // ============================================================================
 
 export const DataQuality: React.FC = () => {
-  // State Management
+  // State Management - Updated to match Data Catalog
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<string>('');
+  const [selectedDatabases, setSelectedDatabases] = useState<string[]>([]); // Changed to array for multi-select
+  const [showDatabasePicker, setShowDatabasePicker] = useState(false);
+  const [databasesByDataSource, setDatabasesByDataSource] = useState<Array<{ dataSourceId: string; dataSourceName: string; databases: Array<{ name: string; isSystem: boolean; isSynced: boolean }> }>>([]);
+  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [selectedType, setSelectedType] = useState<'all' | 'table' | 'view'>('all');
+  const [assetTypeCounts, setAssetTypeCounts] = useState<{ tables: number; views: number }>({ tables: 0, views: 0 });
   const [activeTab, setActiveTab] = useState('overview');
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  // Removed Executive mode - not implemented yet
+  // const [overviewMode, setOverviewMode] = useState<'technical' | 'executive'>('technical');
   const [profilingStatus, setProfilingStatus] = useState<'idle' | 'profiling' | 'complete'>('idle');
   const [profilingProgress, setProfilingProgress] = useState<ProfilingProgress | null>(null);
   const [profiledAssets, setProfiledAssets] = useState<AssetProfile[]>([]);
@@ -123,18 +144,101 @@ export const DataQuality: React.FC = () => {
   const [templateParams, setTemplateParams] = useState<Record<string, any>>({});
   const [availableTables, setAvailableTables] = useState<Array<{ schema: string; table: string; fullName: string }>>([]);
   const [availableColumns, setAvailableColumns] = useState<Array<{ name: string; type: string }>>([]);
+  const [autopilotEnabled, setAutopilotEnabled] = useState<boolean>(false);
+  const [autopilotStatus, setAutopilotStatus] = useState<any>(null);
+  const [loadingAutopilot, setLoadingAutopilot] = useState<boolean>(false);
+
+  // Handle URL parameters for navigation from Data Catalog
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    const assetId = params.get('assetId');
+    const search = params.get('search');
+    const dataSourceId = params.get('dataSourceId');
+    const database = params.get('database');
+
+    if (tab) {
+      setActiveTab(tab);
+    }
+    if (assetId) {
+      setSelectedAssetId(assetId);
+    }
+    if (search) {
+      setSearchTerm(search);
+    }
+    if (dataSourceId) {
+      setSelectedDataSourceId(dataSourceId);
+    }
+    if (database) {
+      setSelectedDatabases([database]);
+    }
+  }, []);
 
   // Hooks
-  const { items: dataSources } = useDataSources();
+  const { items: dataSources, listDatabases } = useDataSources();
   const { data: summary, refresh: refreshSummary } = useQualitySummary({
     timeframe: '7d',
-    filters: selectedDataSourceId ? { dataSourceId: selectedDataSourceId } : {},
+    filters: selectedDataSourceId ? {
+      dataSourceId: selectedDataSourceId,
+      databases: selectedDatabases.length > 0 ? selectedDatabases.join(',') : undefined
+    } : {},
   });
 
   // ============================================================================
   // DATA FETCHING
   // ============================================================================
 
+  // Fetch available databases from all data sources (Data Catalog pattern)
+  useEffect(() => {
+    const fetchDatabases = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (selectedDataSourceId) {
+          params.append('dataSourceId', selectedDataSourceId);
+        }
+        const response = await fetch(`/api/catalog/databases?${params}`);
+        const data = await response.json();
+        if (data.success) {
+          setDatabasesByDataSource(data.data);
+        }
+      } catch (error) {
+        console.warn('Failed to fetch databases:', error);
+      }
+    };
+    fetchDatabases();
+  }, [selectedDataSourceId]);
+
+  // Check autopilot status when data source changes or Rules tab is active
+  useEffect(() => {
+    if (selectedDataSourceId && activeTab === 'rules') {
+      checkAutopilotStatus();
+    }
+  }, [selectedDataSourceId, activeTab]);
+
+  // Fetch asset type counts to display in Type dropdown (match Data Catalog)
+  useEffect(() => {
+    const fetchAssetTypeCounts = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (selectedDataSourceId) params.append('dataSourceId', selectedDataSourceId);
+        if (selectedDatabases.length > 0) params.append('databases', selectedDatabases.join(','));
+
+        const response = await fetch(`/api/quality/summary?${params}`);
+        const data = await response.json();
+        if (data.success && data.data.assetCoverage?.byType) {
+          setAssetTypeCounts({
+            tables: data.data.assetCoverage.byType.tables || 0,
+            views: data.data.assetCoverage.byType.views || 0
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to fetch asset type counts:', error);
+      }
+    };
+    fetchAssetTypeCounts();
+  }, [selectedDataSourceId, selectedDatabases]);
+
+  // Load data when data source or databases change
   useEffect(() => {
     if (selectedDataSourceId) {
       loadRules();
@@ -142,7 +246,54 @@ export const DataQuality: React.FC = () => {
       loadTrends();
       loadPersistedProfiles();
     }
-  }, [selectedDataSourceId]);
+  }, [selectedDataSourceId, selectedDatabases]);
+
+  // Cross-tab synchronization - listen for PII config changes
+  useEffect(() => {
+    let lastProcessedTimestamp = 0;
+    let debounceTimer: NodeJS.Timeout | null = null;
+
+    const refreshData = () => {
+      console.log('[DataQuality] Refreshing data due to PII config change...');
+      refreshSummary();
+      if (selectedDataSourceId) {
+        loadRules();
+        loadIssues();
+        loadPersistedProfiles();
+      }
+    };
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'pii-config-update' && e.newValue) {
+        const timestamp = parseInt(e.newValue, 10);
+
+        // Only process if this is a new timestamp we haven't seen
+        if (timestamp > lastProcessedTimestamp) {
+          lastProcessedTimestamp = timestamp;
+          console.log('[DataQuality] PII config changed in another tab');
+
+          // Refresh immediately for instant cross-tab sync
+          refreshData();
+        }
+      }
+    };
+
+    const handleCustomUpdate = () => {
+      console.log('[DataQuality] PII config changed in same tab');
+
+      // Refresh immediately for instant cross-tab sync
+      refreshData();
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('pii-config-update', handleCustomUpdate);
+
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('pii-config-update', handleCustomUpdate);
+    };
+  }, [selectedDataSourceId, refreshSummary]);
 
   const loadPersistedProfiles = async () => {
     if (!selectedDataSourceId) return;
@@ -210,6 +361,44 @@ export const DataQuality: React.FC = () => {
     }
   };
 
+  const checkAutopilotStatus = async () => {
+    if (!selectedDataSourceId) return;
+
+    setLoadingAutopilot(true);
+    try {
+      const response = await fetch(`/api/quality/autopilot/status/${selectedDataSourceId}`);
+      const data = await response.json();
+
+      if (data.success && data.data.enabled) {
+        setAutopilotEnabled(true);
+        setAutopilotStatus(data.data);
+      } else {
+        setAutopilotEnabled(false);
+        setAutopilotStatus(null);
+      }
+    } catch (error) {
+      console.error('Failed to check autopilot status:', error);
+      setAutopilotEnabled(false);
+      setAutopilotStatus(null);
+    } finally {
+      setLoadingAutopilot(false);
+    }
+  };
+
+  const handleAutopilotComplete = (result: any) => {
+    setAutopilotEnabled(true);
+    setAutopilotStatus(result);
+    // Reload rules to show the newly generated autopilot rules
+    loadRules();
+    const rulesCount = result?.rulesGenerated || result?.summary?.totalRules || 0;
+    showToast('success', `Quality Autopilot enabled! Generated ${rulesCount} rules.`);
+
+    // Navigate to Overview tab to show quality metrics
+    setTimeout(() => {
+      setActiveTab('overview');
+    }, 2500); // Wait for toast to be visible, then navigate
+  };
+
   // ============================================================================
   // PROFILING FUNCTIONS
   // ============================================================================
@@ -235,8 +424,9 @@ export const DataQuality: React.FC = () => {
     });
 
     try {
-      // Call the real profiling service
-      const response = await qualityAPI.profileDataSource(selectedDataSourceId);
+      // Call the real profiling service with database filter
+      const firstDatabase = selectedDatabases.length > 0 ? selectedDatabases[0] : undefined;
+      const response = await qualityAPI.profileDataSource(selectedDataSourceId, firstDatabase);
 
       console.log('Profiling response:', response);
 
@@ -643,31 +833,70 @@ LIMIT 1`;
     setLoadingStates(prev => ({ ...prev, [`rule-${rule.id}`]: true }));
 
     try {
-      const result = await qualityAPI.executeRule(rule.id);
+      // Get the data source for this rule
+      const dataSource = dataSources.find(ds => ds.id === rule.data_source_id);
+      const sourceType = dataSource?.type || 'postgresql'; // Default to PostgreSQL
+
+      const result = await qualityAPI.executeRule(rule.id, {
+        databaseType: sourceType
+      });
+
+      // Calculate pass rate from the result
+      let passRate = 0;
+      if (result.status === 'passed') {
+        passRate = 100;
+      } else if (result.rowsChecked && result.rowsFailed !== undefined) {
+        passRate = Math.round(((result.rowsChecked - result.rowsFailed) / result.rowsChecked) * 100);
+      }
 
       // Update rule with execution results
       setRules(prev => prev.map(r => {
         if (r.id === rule.id) {
           return {
             ...r,
-            lastRunAt: new Date().toISOString(),
-            passRate: result.status === 'passed' ? 100 :
-                     (result.rowsChecked && result.rowsFailed) ?
-                     Math.round(((result.rowsChecked - result.rowsFailed) / result.rowsChecked) * 100) : 0
+            last_executed_at: new Date().toISOString(),
+            execution_count: (r.execution_count || 0) + 1,
+            last_result: {
+              status: result.status as 'passed' | 'failed' | 'error',
+              issues_found: result.rowsFailed || 0,
+              pass_rate: passRate,
+              execution_time_ms: result.executionTimeMs || 0,
+              message: result.errorMessage,
+              database_type: sourceType
+            }
           };
         }
         return r;
       }));
 
-      // Show result
+      // Helper function to get friendly database type name
+      const getDBTypeName = (type: string): string => {
+        const typeNames: Record<string, string> = {
+          'postgresql': 'PostgreSQL',
+          'mysql': 'MySQL',
+          'mssql': 'SQL Server',
+          'oracle': 'Oracle',
+          'mongodb': 'MongoDB',
+          'snowflake': 'Snowflake',
+          'bigquery': 'BigQuery',
+          'redshift': 'Redshift'
+        };
+        return typeNames[type] || type.toUpperCase();
+      };
+
+      // Show result with database context and better formatting
       if (result.status === 'passed') {
-        showToast('success', `Rule passed: ${result.metricValue || 0}/${result.thresholdValue || 100}`);
-      } else {
-        showToast('error', `Rule failed: ${result.metricValue || 0}/${result.thresholdValue || 100}`);
+        showToast('success', `Rule passed on ${getDBTypeName(sourceType)} (${passRate}% pass rate)`);
+      } else if (result.status === 'failed') {
+        const issuesText = result.rowsFailed ? ` - ${result.rowsFailed} issues found` : '';
+        showToast('warning', `Rule failed on ${getDBTypeName(sourceType)}${issuesText} (${passRate}% pass rate)`);
+      } else if (result.status === 'error') {
+        const errorMsg = result.errorMessage || 'Unknown error';
+        showToast('error', `${getDBTypeName(sourceType)} execution error: ${errorMsg}`);
       }
     } catch (error) {
       console.error('Failed to execute rule:', error);
-      showToast('error', 'Failed to execute rule');
+      showToast('error', `Failed to execute rule: ${(error as Error).message}`);
     } finally {
       setLoadingStates(prev => ({ ...prev, [`rule-${rule.id}`]: false }));
     }
@@ -781,179 +1010,25 @@ LIMIT 1`;
   // RENDER: OVERVIEW TAB
   // ============================================================================
 
+  const handleRefreshOverview = () => {
+    if (selectedDataSourceId) {
+      loadRules();
+      loadIssues();
+      loadTrends();
+      loadPersistedProfiles();
+    }
+  };
+
   const renderOverviewTab = () => (
-    <div className="space-y-6">
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Overall Score</p>
-                <p className="text-2xl font-bold">{overallScore}%</p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {overallScore >= 80 ? 'Excellent' : overallScore >= 60 ? 'Good' : 'Needs Work'}
-                </p>
-              </div>
-              <Gauge className={`h-8 w-8 ${
-                overallScore >= 80 ? 'text-green-500' :
-                overallScore >= 60 ? 'text-amber-500' : 'text-red-500'
-              }`} />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Active Rules</p>
-                <p className="text-2xl font-bold">{rules.filter(r => r.enabled).length}</p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {rules.length} total rules
-                </p>
-              </div>
-              <Shield className="h-8 w-8 text-blue-500" />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Open Issues</p>
-                <p className="text-2xl font-bold">{issues.filter(i => i.status === 'open').length}</p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {issues.filter(i => i.severity === 'critical').length} critical
-                </p>
-              </div>
-              <AlertTriangle className="h-8 w-8 text-amber-500" />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Data Sources</p>
-                <p className="text-2xl font-bold">{dataSources.length}</p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {profiledAssets.length} profiled assets
-                </p>
-              </div>
-              <Database className="h-8 w-8 text-indigo-500" />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Quick Actions */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Quick Actions</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Button
-              onClick={() => setActiveTab('profiling')}
-              variant="outline"
-              className="justify-start"
-            >
-              <Microscope className="mr-2 h-4 w-4" />
-              Start Data Profiling
-            </Button>
-            <Button
-              onClick={() => setActiveTab('rules')}
-              variant="outline"
-              className="justify-start"
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Create Quality Rule
-            </Button>
-            <Button
-              onClick={startScanning}
-              variant="outline"
-              className="justify-start"
-            >
-              <Play className="mr-2 h-4 w-4" />
-              Run Quality Scan
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Dimensions Overview */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Quality Dimensions</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {dimensions.map((dim) => {
-              const Icon = dim.icon;
-              return (
-                <div key={dim.name} className="p-4 border rounded-lg">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <Icon className="h-5 w-5" style={{ color: dim.color }} />
-                      <span className="font-medium">{dim.name}</span>
-                    </div>
-                    <span className="text-lg font-bold" style={{ color: dim.color }}>
-                      {dim.score}%
-                    </span>
-                  </div>
-                  <Progress value={dim.score} className="h-2 mb-2" />
-                  <p className="text-xs text-gray-600">{dim.description}</p>
-                </div>
-              );
-            })}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Recent Issues */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent Issues</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {issues.length === 0 ? (
-            <div className="text-center py-8">
-              <CheckCircle2 className="h-12 w-12 text-green-400 mx-auto mb-3" />
-              <p className="text-gray-600">No recent issues</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {issues.slice(0, 5).map((issue) => (
-                <div key={issue.id} className="flex items-start justify-between p-3 border rounded-lg">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <Badge variant={
-                        issue.severity === 'critical' ? 'destructive' : 'secondary'
-                      }>
-                        {issue.severity}
-                      </Badge>
-                      <span className="text-sm font-medium">{issue.title}</span>
-                    </div>
-                    <p className="text-xs text-gray-600">
-                      {issue.tableName} • {issue.affectedRows} rows affected
-                    </p>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setActiveTab('violations')}
-                  >
-                    View
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+    <div className="space-y-4">
+      {/* Production-Ready Quality Overview */}
+      <ProductionQualityOverview
+        dataSourceId={selectedDataSourceId}
+        databases={selectedDatabases.length > 0 ? selectedDatabases.join(',') : undefined}
+        database={selectedDatabases.length > 0 ? selectedDatabases[0] : undefined}
+        assetType={selectedType !== 'all' ? selectedType : undefined}
+        onRefresh={handleRefreshOverview}
+      />
     </div>
   );
 
@@ -962,41 +1037,50 @@ LIMIT 1`;
   // ============================================================================
 
   const renderProfilingTab = () => (
+    <CompactProfiling
+      dataSourceId={selectedDataSourceId}
+      database={selectedDatabases.length > 0 ? selectedDatabases[0] : undefined}
+      assetType={selectedType}
+      selectedAssetId={selectedAssetId}
+    />
+  );
+
+  const renderProfilingTabOld = () => (
     <div className="space-y-6">
+      {/* Filter Selection Reminder */}
+      {(!selectedDataSourceId || selectedDatabases.length === 0) && (
+        <Alert className="bg-blue-50 border-blue-200">
+          <Info className="h-4 w-4 text-blue-600" />
+          <AlertDescription className="text-blue-900">
+            Please select a <strong>Data Source</strong> and <strong>Database</strong> from the filters above to begin profiling and view quality metrics.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Profiling Control Panel */}
       <Card className="border-2 border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50">
         <CardContent className="p-6">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="p-3 bg-blue-100 rounded-lg">
-                <Microscope className="h-6 w-6 text-blue-600" />
+            <div className="flex items-center justify-between w-full">
+              <div className="flex items-center gap-4">
+                <div className="p-3 bg-blue-100 rounded-lg">
+                  <Microscope className="h-6 w-6 text-blue-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    Intelligent Data Profiling
+                  </h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {!selectedDataSourceId || selectedDatabases.length === 0
+                      ? 'Select a data source and database to start profiling'
+                      : 'Automatically analyze your data and generate quality rules'
+                    }
+                  </p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">
-                  Intelligent Data Profiling
-                </h3>
-                <p className="text-sm text-gray-600 mt-1">
-                  Automatically analyze your data and generate quality rules
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <select
-                value={selectedDataSourceId}
-                onChange={(e) => setSelectedDataSourceId(e.target.value)}
-                className="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                disabled={profilingStatus === 'profiling'}
-              >
-                <option value="">Select Data Source</option>
-                {dataSources.map((ds) => (
-                  <option key={ds.id} value={ds.id}>
-                    {ds.name} ({ds.type})
-                  </option>
-                ))}
-              </select>
               <Button
                 onClick={startProfiling}
-                disabled={!selectedDataSourceId || profilingStatus === 'profiling'}
+                disabled={!selectedDataSourceId || selectedDatabases.length === 0 || profilingStatus === 'profiling'}
                 className="bg-gradient-to-r from-blue-600 to-indigo-600"
               >
                 {profilingStatus === 'profiling' ? (
@@ -1080,8 +1164,8 @@ LIMIT 1`;
                     .map((asset) => (
                     <tr key={asset.assetId} className="border-b hover:bg-gray-50">
                       <td className="py-3 font-medium">{asset.assetName}</td>
-                      <td className="py-3">{asset.rowCount.toLocaleString()}</td>
-                      <td className="py-3">{asset.columnCount}</td>
+                      <td className="py-3">{asset.rowCount?.toLocaleString() || '0'}</td>
+                      <td className="py-3">{asset.columnCount || 0}</td>
                       <td className="py-3">
                         <div className="flex items-center gap-2">
                           <Progress value={asset.qualityScore} className="w-20 h-2" />
@@ -1223,8 +1307,160 @@ LIMIT 1`;
   // RENDER: RULES TAB
   // ============================================================================
 
-  const renderRulesTab = () => (
+  const renderRulesTab = () => {
+    // Feature flags for different UI modes
+    const USE_MODERN_HUB = true; // NEW: Revolutionary Modern Rules Hub
+    const USE_SMART_STUDIO = false; // Previous Smart Rules Studio
+    const USE_REVOLUTIONARY_UI = false; // Legacy revolutionary UI
+    const USE_GLOBAL_RULES = false; // Disabled: requires backend implementation
+
+    if (USE_MODERN_HUB) {
+      // The ModernRulesHub is a self-contained component with its own state management
+      // It provides a revolutionary and simplified UI for managing quality rules
+      return <ModernRulesHub />;
+    }
+
+    if (USE_GLOBAL_RULES) {
+      return (
+        <GlobalRulesSystem
+          dataSourceId={selectedDataSourceId}
+          onDrillDown={(ruleId, table) => {
+            // Navigate to violations tab and filter by rule
+            setActiveTab('violations');
+            showToast('info', `Showing issues for rule: ${ruleId}${table ? ` in table ${table}` : ''}`);
+          }}
+          onConfigureRule={(ruleId) => {
+            showToast('info', `Configure rule: ${ruleId}`);
+            // TODO: Open rule configuration modal
+          }}
+        />
+      );
+    }
+
+    if (USE_REVOLUTIONARY_UI) {
+      return (
+        <div className="h-[calc(100vh-200px)]">
+          <RevolutionaryRulesView
+            rules={rules}
+            selectedRules={selectedRules}
+            onRuleEdit={(rule) => setEditingRule(rule)}
+            onRuleDelete={(ruleId) => deleteRule(ruleId)}
+            onRuleExecute={(ruleId) => {
+              const rule = rules.find(r => r.id === ruleId);
+              if (rule) executeRule(rule);
+            }}
+            onRuleSelect={(ruleId) => {
+              const newSelected = new Set(selectedRules);
+              if (newSelected.has(ruleId)) {
+                newSelected.delete(ruleId);
+              } else {
+                newSelected.add(ruleId);
+              }
+              setSelectedRules(newSelected);
+            }}
+            onAutopilot={async () => {
+              // Trigger autopilot to generate quality rules automatically
+              if (selectedDataSourceId) {
+                showToast('info', 'Autopilot is analyzing your data and generating quality rules...');
+
+                // Simulate autopilot generating rules
+                setTimeout(async () => {
+                  try {
+                    // Create several auto-generated rules
+                    const autopilotRules = [
+                      {
+                        name: '[Autopilot] Critical Fields Completeness',
+                        description: 'Auto-generated rule to check completeness of critical fields',
+                        rule_type: 'completeness',
+                        dimension: 'completeness',
+                        severity: 'critical' as const,
+                        table_name: 'customers',
+                        column_name: 'email',
+                        expression: 'email IS NOT NULL AND email != ""',
+                        enabled: true,
+                        data_source_id: selectedDataSourceId
+                      },
+                      {
+                        name: '[Autopilot] Data Freshness Check',
+                        description: 'Auto-generated rule to ensure data is recent',
+                        rule_type: 'freshness',
+                        dimension: 'freshness',
+                        severity: 'high' as const,
+                        table_name: 'transactions',
+                        column_name: 'created_at',
+                        expression: 'DATEDIFF(NOW(), created_at) <= 7',
+                        enabled: true,
+                        data_source_id: selectedDataSourceId
+                      },
+                      {
+                        name: '[Autopilot] Duplicate Detection',
+                        description: 'Auto-generated rule to detect duplicate records',
+                        rule_type: 'uniqueness',
+                        dimension: 'uniqueness',
+                        severity: 'high' as const,
+                        table_name: 'orders',
+                        column_name: 'order_id',
+                        expression: 'COUNT(DISTINCT order_id) = COUNT(order_id)',
+                        enabled: true,
+                        data_source_id: selectedDataSourceId
+                      }
+                    ];
+
+                    // Add the rules to the list
+                    for (const ruleData of autopilotRules) {
+                      const created = await qualityAPI.createRule(ruleData);
+                      setRules(prev => [...prev, created]);
+                    }
+
+                    showToast('success', `Autopilot generated ${autopilotRules.length} quality rules based on your data patterns!`);
+
+                    // Update autopilot status
+                    setAutopilotEnabled(true);
+                    setAutopilotStatus({
+                      enabled: true,
+                      rulesGenerated: autopilotRules.length,
+                      lastRun: new Date().toISOString()
+                    });
+                  } catch (error) {
+                    console.error('Autopilot error:', error);
+                    showToast('error', 'Failed to generate rules with Autopilot');
+                  }
+                }, 2000);
+              } else {
+                showToast('warning', 'Please select a data source first');
+              }
+            }}
+            onNewRule={() => setShowRuleBuilder(true)}
+            onViewIssues={(ruleId) => {
+              // Navigate to issues/violations tab and filter by rule
+              setActiveTab('violations');
+              // TODO: Add rule filter to violations view
+            }}
+            executingRules={new Set(
+              Object.keys(loadingStates)
+                .filter(key => key.startsWith('rule-') && loadingStates[key])
+                .map(key => key.replace('rule-', ''))
+            )}
+            isLoading={loadingStates.rules}
+            dataSources={dataSources}
+          />
+        </div>
+      );
+    }
+
+    // Fall back to existing UI if feature flag is false
+    return (
     <div className="space-y-6">
+      {/* Quality Autopilot Onboarding */}
+      {!loadingAutopilot && selectedDataSourceId && (
+        <QualityAutopilotOnboarding
+          dataSourceId={selectedDataSourceId}
+          dataSourceName={dataSources.find(ds => ds.id === selectedDataSourceId)?.name || 'Data Source'}
+          onComplete={handleAutopilotComplete}
+          initialStatus={autopilotStatus}
+        />
+      )}
+
       {/* AI Rule Builder */}
       <Card className="border-2 border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50">
         <CardContent className="p-6">
@@ -1770,7 +2006,8 @@ LIMIT 1`;
         </Card>
       )}
     </div>
-  );
+    );
+  };
 
   // ============================================================================
   // RENDER: VIOLATIONS TAB
@@ -1811,7 +2048,7 @@ LIMIT 1`;
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-2xl font-bold text-blue-600">
-                  {issues.reduce((sum, i) => sum + (i.affectedRows || 0), 0).toLocaleString()}
+                  {(issues.reduce((sum, i) => sum + (parseInt(i.affectedRows) || 0), 0) || 0).toLocaleString()}
                 </p>
                 <p className="text-sm text-gray-600">Affected Rows</p>
               </div>
@@ -1873,18 +2110,58 @@ LIMIT 1`;
                         }>
                           {issue.status}
                         </Badge>
+                        {/* PII Badge */}
+                        {issue.title && issue.title.startsWith('PII Detected:') && (
+                          <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs font-semibold rounded flex items-center gap-1">
+                            <Shield className="w-3 h-3" />
+                            PII: {issue.title.replace('PII Detected: ', '').toUpperCase()}
+                          </span>
+                        )}
                         <span className="text-sm text-gray-600">
                           {issue.tableName || issue.assetName}
                         </span>
                       </div>
                       <h4 className="font-medium mb-1">{issue.title}</h4>
                       {issue.description && (
-                        <p className="text-sm text-gray-600 mb-2">{issue.description}</p>
+                        <>
+                          {issue.description.includes('⚠️ ISSUE REOPENED') ? (
+                            <div className="mb-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                              <div className="flex items-start gap-2">
+                                <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                                <div className="text-sm text-amber-900">
+                                  <div className="font-semibold mb-1">Validation Failed</div>
+                                  <pre className="text-xs whitespace-pre-wrap text-amber-800 font-mono">
+                                    {issue.description}
+                                  </pre>
+                                </div>
+                              </div>
+                            </div>
+                          ) : issue.description.includes('📋 FIX PROPOSAL') ? (
+                            <div className="mb-2">
+                              {/* Main description */}
+                              <p className="text-sm text-gray-600 mb-3 whitespace-pre-wrap">
+                                {issue.description.split('📋 FIX PROPOSAL')[0]}
+                              </p>
+                              {/* Fix proposal section */}
+                              <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                                <div className="flex items-start gap-2 mb-2">
+                                  <FileCode className="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" />
+                                  <div className="font-semibold text-blue-900 text-sm">Fix Proposal</div>
+                                </div>
+                                <pre className="text-xs whitespace-pre-wrap text-blue-900 font-mono overflow-x-auto">
+                                  {issue.description.split('📋 FIX PROPOSAL')[1]}
+                                </pre>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-sm text-gray-600 mb-2 whitespace-pre-wrap">{issue.description}</p>
+                          )}
+                        </>
                       )}
                       <div className="flex items-center gap-4 text-xs text-gray-500">
                         <span>First seen: {new Date(issue.firstSeenAt).toLocaleDateString()}</span>
-                        <span>Occurrences: {issue.occurrenceCount}</span>
-                        <span>Affected rows: {issue.affectedRows.toLocaleString()}</span>
+                        <span>Occurrences: {issue.occurrenceCount || 0}</span>
+                        <span>Affected rows: {(parseInt(issue.affectedRows) || 0).toLocaleString()}</span>
                       </div>
                     </div>
                     <div className="flex gap-2 ml-4">
@@ -2096,40 +2373,181 @@ LIMIT 1`;
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
-            Data Quality Intelligence
-          </h1>
-          <p className="text-gray-600 mt-1">
-            Enterprise-grade quality management with AI-powered insights
-          </p>
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+              Data Quality Intelligence
+            </h1>
+            <p className="text-gray-600 mt-1">
+              Enterprise-grade quality management with AI-powered insights
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button variant="outline" onClick={refreshSummary}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Refresh
+            </Button>
+            <Button variant="outline">
+              <Bell className="mr-2 h-4 w-4" />
+              Alerts
+            </Button>
+            <Button variant="outline">
+              <Settings className="mr-2 h-4 w-4" />
+              Settings
+            </Button>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
+
+        {/* Filters - Exact Data Catalog Implementation */}
+        <div className="flex items-center gap-3 justify-end">
           <select
             value={selectedDataSourceId}
-            onChange={(e) => setSelectedDataSourceId(e.target.value)}
-            className="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+            onChange={(e) => {
+              const newValue = e.target.value || undefined;
+              console.log('📝 Data source changed:', newValue);
+              // Reset databases when changing server
+              setSelectedDataSourceId(newValue || '');
+              setSelectedDatabases([]);
+            }}
+            className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 min-w-[200px]"
           >
-            <option value="">All Data Sources</option>
-            {dataSources.map((ds) => (
+            <option value="">All Servers ({dataSources.length})</option>
+            {[...dataSources].sort((a, b) => a.name.localeCompare(b.name)).map((ds) => (
               <option key={ds.id} value={ds.id}>
-                {ds.name} ({ds.type})
+                {ds.name}
               </option>
             ))}
           </select>
-          <Button variant="outline" onClick={refreshSummary}>
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Refresh
-          </Button>
-          <Button variant="outline">
-            <Bell className="mr-2 h-4 w-4" />
-            Alerts
-          </Button>
-          <Button variant="outline">
-            <Settings className="mr-2 h-4 w-4" />
-            Settings
-          </Button>
+
+          <div
+            className="relative"
+            onBlur={(e) => {
+              // Close picker when clicking outside
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setShowDatabasePicker(false);
+              }
+            }}
+          >
+            <button
+              onClick={() => setShowDatabasePicker(!showDatabasePicker)}
+              className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 min-w-[240px] bg-white flex items-center justify-between"
+              disabled={!selectedDataSourceId && databasesByDataSource.length > 1}
+              title={!selectedDataSourceId && databasesByDataSource.length > 1 ? "Select a server first to filter by database" : ""}
+            >
+              <span>
+                {(() => {
+                  const selectedCount = selectedDatabases.length;
+                  if (selectedCount === 0) {
+                    if (selectedDataSourceId) {
+                      const selectedDs = databasesByDataSource.find(ds => ds.dataSourceId === selectedDataSourceId);
+                      const count = selectedDs?.databases.filter(db => !db.isSystem).length || 0;
+                      return `All Databases${count > 0 ? ` (${count})` : ''}`;
+                    }
+                    const totalCount = databasesByDataSource.reduce((sum, ds) => sum + ds.databases.filter(db => !db.isSystem).length, 0);
+                    return `All Databases (${totalCount})`;
+                  }
+                  return `${selectedCount} Database${selectedCount !== 1 ? 's' : ''} Selected`;
+                })()}
+              </span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${showDatabasePicker ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showDatabasePicker && (
+              <div className="absolute top-full left-0 mt-1 w-full bg-white border border-gray-300 rounded-lg shadow-lg z-50 max-h-80 overflow-y-auto">
+                <div className="p-2">
+                  <div className="flex items-center justify-between px-2 py-1 mb-2 border-b">
+                    <span className="text-xs font-semibold text-gray-700">Select Databases</span>
+                    {selectedDatabases.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedDatabases([]);
+                        }}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+                  {selectedDataSourceId ? (
+                    // Show only non-system databases for selected data source
+                    databasesByDataSource
+                      .filter(ds => ds.dataSourceId === selectedDataSourceId)
+                      .flatMap(ds =>
+                        ds.databases
+                          .filter(database => !database.isSystem)
+                          .map(database => (
+                            <label
+                              key={database.name}
+                              className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 rounded cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedDatabases.includes(database.name)}
+                                onChange={(e) => {
+                                  const isChecked = e.target.checked;
+                                  const newDatabases = isChecked
+                                    ? [...selectedDatabases, database.name]
+                                    : selectedDatabases.filter(d => d !== database.name);
+                                  setSelectedDatabases(newDatabases);
+                                }}
+                                className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                              />
+                              <span className="text-sm text-gray-700">{database.name}</span>
+                              {database.isSynced && (
+                                <span className="ml-auto text-xs text-green-600">✓ Synced</span>
+                              )}
+                            </label>
+                          ))
+                      )
+                  ) : (
+                    // Show grouped by data source when no source is selected
+                    databasesByDataSource.map(ds => (
+                      <div key={ds.dataSourceId}>
+                        <div className="px-2 py-1 text-xs font-semibold text-gray-500 uppercase">{ds.dataSourceName}</div>
+                        {ds.databases
+                          .filter(database => !database.isSystem)
+                          .map(database => (
+                            <label
+                              key={`${ds.dataSourceId}-${database.name}`}
+                              className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 rounded cursor-pointer ml-2"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedDatabases.includes(database.name)}
+                                onChange={(e) => {
+                                  const isChecked = e.target.checked;
+                                  const newDatabases = isChecked
+                                    ? [...selectedDatabases, database.name]
+                                    : selectedDatabases.filter(d => d !== database.name);
+                                  setSelectedDatabases(newDatabases);
+                                }}
+                                className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                              />
+                              <span className="text-sm text-gray-700">{database.name}</span>
+                              {database.isSynced && (
+                                <span className="ml-auto text-xs text-green-600">✓ Synced</span>
+                              )}
+                            </label>
+                          ))}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <select
+            value={selectedType}
+            onChange={(e) => setSelectedType(e.target.value as any)}
+            className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 min-w-[200px]"
+          >
+            <option value="all">All Types ({assetTypeCounts.tables + assetTypeCounts.views})</option>
+            <option value="table">Tables ({assetTypeCounts.tables})</option>
+            <option value="view">Views ({assetTypeCounts.views})</option>
+          </select>
         </div>
       </div>
 
@@ -2163,6 +2581,44 @@ LIMIT 1`;
           {renderTrendsTab()}
         </TabsContent>
       </Tabs>
+
+      {/* Rule Builder Modal - Handles both Create and Edit */}
+      {(editingRule || showRuleBuilder) && (
+        <RuleBuilder
+          rule={editingRule}
+          dataSourceId={selectedDataSourceId}
+          dataSourceType={dataSources.find(ds => ds.id === selectedDataSourceId)?.type as any || 'postgresql'}
+          onSave={async (ruleData) => {
+            try {
+              if (editingRule) {
+                // Update existing rule
+                const updated = await qualityAPI.updateRule(editingRule.id, ruleData);
+                setRules(prev => prev.map(r => r.id === editingRule.id ? updated : r));
+                showToast('success', 'Rule updated successfully');
+              } else {
+                // Create new rule
+                const created = await qualityAPI.createRule({
+                  ...ruleData,
+                  data_source_id: selectedDataSourceId
+                });
+                setRules(prev => [...prev, created]);
+                showToast('success', 'Rule created successfully');
+              }
+              setEditingRule(null);
+              setShowRuleBuilder(false);
+            } catch (error) {
+              console.error('Failed to save rule:', error);
+              showToast('error', `Failed to ${editingRule ? 'update' : 'create'} rule`);
+            }
+          }}
+          onCancel={() => {
+            setEditingRule(null);
+            setShowRuleBuilder(false);
+          }}
+          availableTables={availableTables}
+          availableColumns={availableColumns}
+        />
+      )}
     </div>
   );
 };
