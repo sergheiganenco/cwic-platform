@@ -20,6 +20,9 @@
  * - Fullscreen mode
  * - Customizable background patterns
  */
+import { ModernLineageGraph } from '@/components/lineage/ModernLineageGraph';
+import { CinematicLineageGraph } from '@/components/lineage/CinematicLineageGraph';
+import { RevolutionaryLineageGraph } from '@/components/lineage/RevolutionaryLineageGraph';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
@@ -339,6 +342,37 @@ const getLayoutedElements = (
   return { nodes: layoutedNodes, edges };
 };
 
+  // State management
+  const [selectedDataSource, setSelectedDataSource] = useState<string>('');
+  const [hierarchy, setHierarchy] = useState<HierarchyNode[]>([]);
+  const [selectedNode, setSelectedNode] = useState<HierarchyNode | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [viewMode, setViewMode] = useState<'hierarchy' | 'graph'>('hierarchy');
+  const [graphDepth, setGraphDepth] = useState(3);
+  const [direction, setDirection] = useState<'both' | 'upstream' | 'downstream'>('both');
+  const [loading, setLoading] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [hoveredNode, setHoveredNode] = useState<HierarchyNode | null>(null);
+  const [graphStyle, setGraphStyle] = useState<'modern' | 'cinematic' | 'revolutionary'>('revolutionary');
+  const [lineageMode, setLineageMode] = useState<'explore' | 'impact' | 'timetravel'>('explore');
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [impactSelectedUrn, setImpactSelectedUrn] = useState<string | null>(null);
+  const [downstreamUrns, setDownstreamUrns] = useState<Set<string>>(new Set());
+
+  // Command palette hotkey (Ctrl/Cmd + K)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setShowCommandPalette(true);
+      }
+      if (e.key === 'Escape') {
+        setShowCommandPalette(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 // ==================== CUSTOM NODE COMPONENT ====================
 const CustomNode = ({ data, selected }: { data: any; selected: boolean }) => {
   const colors = NODE_COLORS[data.type as NodeType] || NODE_COLORS.table;
@@ -1605,6 +1639,37 @@ function DataLineage(): JSX.Element {
                 />
               )}
 
+              {viewMode === 'graph' && (
+                <>
+                  <div className="animate-in fade-in duration-300">
+                    <label className="text-sm font-medium text-gray-700 mb-2 block">Style</label>
+                    <div className="flex gap-2">
+                      <Button
+                        variant={graphStyle === 'modern' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setGraphStyle('modern')}
+                        className="hover:scale-105 transition-transform duration-200"
+                      >
+                        Modern
+                      </Button>
+                      <Button
+                        variant={graphStyle === 'cinematic' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setGraphStyle('cinematic')}
+                        className="hover:scale-105 transition-transform duration-200"
+                      >
+                        Cinematic
+                      </Button>
+                      <Button
+                        variant={graphStyle === 'revolutionary' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setGraphStyle('revolutionary')}
+                        className="hover:scale-105 transition-transform duration-200 bg-gradient-to-r from-purple-600 to-blue-600 text-white"
+                      >
+                        <GitBranch className="mr-2 h-4 w-4" />
+                        Revolutionary
+                      </Button>
+                    </div>
               {/* Selected Node Details Panel */}
               {selectedNode && (
                 <Panel
@@ -1758,6 +1823,74 @@ function DataLineage(): JSX.Element {
                           <div className="text-yellow-700 font-semibold text-xs mb-1">Nodes</div>
                           <div className="text-3xl font-bold text-yellow-900">{highlightedPath.nodes.length}</div>
                         </div>
+                        <code className="text-sm font-mono block mt-2">{selectedNode.metadata.computedExpression}</code>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <Card className="border-0 shadow-xl bg-white/90 backdrop-blur-xl h-[calc(100vh-400px)] overflow-hidden hover:shadow-2xl transition-shadow duration-300 relative">
+            {/* Animated border gradient */}
+            <div className="absolute inset-0 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 opacity-0 hover:opacity-10 transition-opacity duration-500 pointer-events-none" />
+            
+            <CardHeader className="pb-3 border-b border-gradient-to-r from-indigo-100 to-purple-100">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <div className="p-2 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg animate-pulse">
+                    <Network className="h-5 w-5 text-white" />
+                  </div>
+                  {viewMode === 'hierarchy' ? 'Hierarchy View' : 'Lineage Graph'}
+                  {graphData.edges.length > 0 && (
+                    <Badge className="ml-2 animate-in fade-in duration-300 bg-gradient-to-r from-green-500 to-emerald-600 text-white shadow-lg">
+                      {graphData.edges.length} connection{graphData.edges.length !== 1 ? 's' : ''}
+                    </Badge>
+                  )}
+                </CardTitle>
+                {selectedNode && (
+                  <div className="flex items-center gap-2 animate-in slide-in-from-right duration-300">
+                    <Link2 className="h-4 w-4 text-indigo-500 animate-pulse" />
+                    <Badge className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg hover:shadow-xl transition-shadow">
+                      {selectedNode.name}
+                    </Badge>
+                    {selectedNode.metadata?.isView && (
+                      <Badge variant="secondary" className="animate-in fade-in duration-300 delay-100 bg-purple-100 text-purple-700">VIEW</Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="h-full pb-6">
+              {viewMode === 'hierarchy' ? (
+                <div className="flex items-center justify-center h-full text-gray-400 animate-in fade-in duration-500">
+                  <div className="text-center">
+                    <div className="relative inline-block mb-4">
+                      <Box className="h-16 w-16 opacity-50 animate-pulse" />
+                      <div className="absolute inset-0 blur-2xl bg-indigo-500/20 animate-pulse" />
+                    </div>
+                    <p className="text-lg font-medium mb-2 animate-in slide-in-from-bottom duration-500 delay-100">Select a node to view lineage</p>
+                    <p className="text-sm animate-in slide-in-from-bottom duration-500 delay-200">Click on any table or column in the hierarchy to visualize its relationships</p>
+                    <div className="mt-6 flex items-center justify-center gap-2 animate-in fade-in duration-500 delay-300">
+                      <div className="h-2 w-2 rounded-full bg-indigo-500 animate-ping" />
+                      <div className="h-2 w-2 rounded-full bg-purple-500 animate-ping delay-100" />
+                      <div className="h-2 w-2 rounded-full bg-pink-500 animate-ping delay-200" />
+                    </div>
+                  </div>
+                </div>
+              ) : graphData.nodes.length > 0 ? (
+                <div className="h-full rounded-lg overflow-hidden animate-in zoom-in duration-700 relative">
+                  {graphStyle === 'revolutionary' ? (
+                    <RevolutionaryLineageGraph />
+                  ) : graphStyle === 'modern' ? (
+                    <>
+                      {/* Connection counter overlay */}
+                      <div className="absolute top-4 right-4 z-10 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg px-4 py-2 animate-in slide-in-from-top duration-500">
+                        <div className="flex items-center gap-2 text-sm">
+                          <GitBranch className="h-4 w-4 text-indigo-600" />
+                          <span className="font-semibold text-gray-900">{graphData.edges.length}</span>
+                          <span className="text-gray-600">active connection{graphData.edges.length !== 1 ? 's' : ''}</span>
                         <div className="text-center">
                           <div className="text-yellow-700 font-semibold text-xs mb-1">Edges</div>
                           <div className="text-3xl font-bold text-yellow-900">{highlightedPath.edges.length}</div>
