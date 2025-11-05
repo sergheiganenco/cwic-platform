@@ -2,13 +2,16 @@
 import { Badge } from '@components/ui/Badge'
 import { Button } from '@components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@components/ui/Card'
+import { GradientIcon } from '@components/ui/GradientIcon'
+import { GradientText } from '@components/ui/GradientText'
 import { Input } from '@components/ui/Input'
 import { Modal } from '@components/ui/Modal'
 import { useToast } from '@components/ui/Notification'
+import { ProgressBar } from '@components/ui/ProgressBar'
 import { Select } from '@components/ui/Select'
 import { useQuery } from '@tanstack/react-query'
 import { cn } from '@utils/cn'
-import { ChevronRight, Clock, GitBranch, Pause, Play, RefreshCcw, Server, Shield } from 'lucide-react'
+import { ChevronRight, Clock, GitBranch, Pause, Play, Plus, RefreshCcw, Server, Shield } from 'lucide-react'
 import type { ComponentProps } from 'react'
 import * as React from 'react'
 
@@ -162,10 +165,30 @@ export const Pipelines: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-4xl font-bold flex items-center gap-3">
+            <GradientIcon icon={GitBranch} color="blue" size="lg" animate />
+            <GradientText from="blue-600" via="indigo-600" to="purple-600">
+              Data Pipelines
+            </GradientText>
+          </h1>
+          <p className="text-gray-600 mt-2">Monitor and manage your ETL workflows</p>
+        </div>
+        <Button
+          variant="default"
+          className="bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:shadow-xl transition-all"
+          leftIcon={<Plus className="h-5 w-5" />}
+        >
+          Create Pipeline
+        </Button>
+      </div>
+
       {/* Controls */}
-      <Card>
+      <Card className="border-0 shadow-lg">
         <CardHeader>
-          <CardTitle>Pipelines</CardTitle>
+          <CardTitle>Filters</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
@@ -242,33 +265,39 @@ export const Pipelines: React.FC = () => {
           {data.map((p) => {
             const tone = statusTone(p.status)
             const envT = envBadge(p.environment)
+            // Simulate progress for running pipelines (you can replace with real progress data)
+            const progress = p.status === 'running' ? Math.floor(Math.random() * 100) : 100
+
             return (
-              <Card key={p.id} className="hover:shadow-md transition">
-                <CardContent className="p-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-base font-semibold text-gray-900">{p.name}</span>
-                        <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', envT.className)}>
-                          {envT.label}
-                        </span>
-                      </div>
-                      <div className="mt-1 text-sm text-gray-600 line-clamp-2">{p.description ?? '—'}</div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <Badge tone={tone.tone}>{tone.label}</Badge>
-                        {p.branch && (
-                          <span className="inline-flex items-center gap-1 text-xs text-gray-600">
-                            <GitBranch className="h-3.5 w-3.5" /> {p.branch}
+              <Card key={p.id} className="hover:shadow-2xl hover:scale-105 transition-all duration-300 border-0 shadow-lg">
+                <CardContent className="p-6">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-3">
+                      <GradientIcon
+                        icon={GitBranch}
+                        color={
+                          p.status === 'running' ? 'blue' :
+                          p.status === 'failed' ? 'red' :
+                          p.status === 'succeeded' ? 'green' : 'purple'
+                        }
+                        size="md"
+                      />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-bold text-gray-900">{p.name}</span>
+                          <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-bold', envT.className)}>
+                            {envT.label}
                           </span>
-                        )}
-                        {p.owner && (
-                          <span className="inline-flex items-center gap-1 text-xs text-gray-600">
-                            <Shield className="h-3.5 w-3.5" /> {p.owner}
-                          </span>
-                        )}
-                        <span className="inline-flex items-center gap-1 text-xs text-gray-600">
-                          <Clock className="h-3.5 w-3.5" /> Last run: {fmtTime(p.lastRun)}
-                        </span>
+                        </div>
+                        <Badge
+                          tone={tone.tone}
+                          className={cn(
+                            'mt-1',
+                            p.status === 'running' && 'animate-pulse'
+                          )}
+                        >
+                          {tone.label}
+                        </Badge>
                       </div>
                     </div>
                     <Button variant="ghost" size="icon" aria-label="Open details" onClick={() => setSelected(p)}>
@@ -276,13 +305,53 @@ export const Pipelines: React.FC = () => {
                     </Button>
                   </div>
 
+                  <div className="mt-3 text-sm text-gray-600 line-clamp-2">{p.description ?? 'No description'}</div>
+
+                  {/* Progress bar for running pipelines */}
+                  {p.status === 'running' && (
+                    <div className="mt-4">
+                      <ProgressBar
+                        value={progress}
+                        color="blue"
+                        height="md"
+                        showLabel
+                        label="Progress"
+                        animate
+                      />
+                    </div>
+                  )}
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                    {p.branch && (
+                      <span className="inline-flex items-center gap-1">
+                        <GitBranch className="h-3.5 w-3.5" /> {p.branch}
+                      </span>
+                    )}
+                    {p.owner && (
+                      <span className="inline-flex items-center gap-1">
+                        <Shield className="h-3.5 w-3.5" /> {p.owner}
+                      </span>
+                    )}
+                    <span className="inline-flex items-center gap-1">
+                      <Clock className="h-3.5 w-3.5" /> {fmtTime(p.lastRun)}
+                    </span>
+                  </div>
+
                   <div className="mt-4 flex items-center gap-2">
                     {p.status !== 'running' ? (
-                      <Button onClick={() => handleStart(p)} leftIcon={<Play className="h-4 w-4" />}>
+                      <Button
+                        onClick={() => handleStart(p)}
+                        leftIcon={<Play className="h-4 w-4" />}
+                        className="flex-1"
+                      >
                         Start
                       </Button>
                     ) : (
-                      <Button variant="outline" leftIcon={<Pause className="h-4 w-4" />}>
+                      <Button
+                        variant="outline"
+                        leftIcon={<Pause className="h-4 w-4" />}
+                        className="flex-1"
+                      >
                         Pause
                       </Button>
                     )}

@@ -13,7 +13,7 @@ import { DatabaseService } from './DatabaseService';
 const LineageNodeSchema = z.object({
   id: z.string().uuid(),
   label: z.string().min(1).max(255),
-  type: z.enum(['source', 'bronze', 'silver', 'gold', 'transformation', 'sink']),
+  type: z.enum(['source', 'bronze', 'silver', 'gold', 'transformation', 'sink', 'database', 'schema', 'table', 'column', 'view', 'procedure', 'function']),
   data_source_id: z.string().uuid().optional(),
   schema_name: z.string().max(100).optional(),
   table_name: z.string().max(100).optional(),
@@ -39,7 +39,7 @@ const LineageEdgeSchema = z.object({
 
 const GraphFiltersSchema = z.object({
   dataSourceId: z.string().uuid().optional(),
-  nodeTypes: z.array(z.enum(['source', 'bronze', 'silver', 'gold', 'transformation', 'sink'])).optional(),
+  nodeTypes: z.array(z.enum(['source', 'bronze', 'silver', 'gold', 'transformation', 'sink', 'database', 'schema', 'table', 'column', 'view', 'procedure', 'function'])).optional(),
   maxDepth: z.number().min(1).max(10).default(5),
   includeMetadata: z.boolean().default(false),
   relationshipTypes: z.array(z.enum(['derives_from', 'transforms_to', 'copies_from', 'aggregates_from'])).optional(),
@@ -1034,6 +1034,385 @@ export class LineageService {
         if (now - entry.timestamp > entry.ttl) this.queryCache.delete(key);
       }
     }, 300000).unref();
+  }
+
+  /* ── Build Demo Graph from Assets ─────────────────────────────────────── */
+
+  async buildDemoGraph(dataSourceId?: string): Promise<LineageGraph> {
+    try {
+      // Fetch assets from the catalog (using correct column names from catalog_assets table)
+      // Filter system tables and optionally by data source
+      const params: any[] = [];
+      let whereClause = `WHERE asset_type IN ('table', 'view')`;
+
+      // Filter out system/internal tables
+      whereClause += ` AND schema_name NOT IN ('information_schema', 'pg_catalog', 'sys')`;
+      whereClause += ` AND table_name NOT LIKE 'pg_%'`;
+      whereClause += ` AND table_name NOT LIKE 'sql_%'`;
+
+      if (dataSourceId) {
+        whereClause += ` AND datasource_id = $1`;
+        params.push(dataSourceId);
+      }
+
+      const assetsQuery = `
+        SELECT
+          id::text,
+          table_name as name,
+          asset_type as type,
+          datasource_id::text as data_source_id,
+          schema_name,
+          table_name,
+          description,
+          row_count,
+          column_count,
+          trust_score,
+          quality_score,
+          updated_at
+        FROM catalog_assets
+        ${whereClause}
+        ORDER BY schema_name, table_name
+        LIMIT 100
+      `;
+
+      const assetsRes = (await this.db.query(assetsQuery, params)) as any;
+      const assets = assetsRes.rows ?? [];
+
+      logger.info('Assets fetched for lineage', { count: assets.length, dataSourceId });
+
+      // Build nodes from assets with enriched metadata
+      const nodes: LineageNode[] = assets.map((asset: any) => ({
+        id: asset.id,
+        label: asset.name || asset.table_name || 'Unknown',
+        type: this.mapAssetTypeToLineageType(asset.type),
+        data_source_id: asset.data_source_id,
+        schema_name: asset.schema_name,
+        table_name: asset.table_name || asset.name,
+        description: asset.description,
+        metadata: {
+          rowCount: asset.row_count ? Number(asset.row_count) : undefined,
+          columnCount: asset.column_count ? Number(asset.column_count) : undefined,
+          trustScore: asset.trust_score ? Number(asset.trust_score) : undefined,
+          quality_score: asset.quality_score ? Number(asset.quality_score) : undefined,
+          lastUpdated: asset.updated_at,
+          schema: asset.schema_name,
+          tableName: asset.table_name,
+        },
+      }));
+
+      // Build edges from Foreign Key relationships in catalog_columns
+      const nodeIds = nodes.map(n => n.id);
+      const assetIdToTable = new Map(nodes.map(n => [n.id, { schema: n.schema_name, table: n.table_name }]));
+      const tableToAssetId = new Map(nodes.map(n => [`${n.schema_name}.${n.table_name}`, n.id]));
+
+      let edges: LineageEdge[] = [];
+
+      if (nodeIds.length > 0 && dataSourceId) {
+        // Query foreign key relationships from catalog_columns
+        // This will give us real FK-based lineage connections
+        const fkQuery = `
+          SELECT DISTINCT
+            cc.asset_id::text as source_asset_id,
+            ca_ref.id::text as target_asset_id,
+            cc.column_name as source_column,
+            cc.foreign_key_column as target_column,
+            cc.foreign_key_table as referenced_table
+          FROM catalog_columns cc
+          JOIN catalog_assets ca ON ca.id = cc.asset_id
+          JOIN catalog_assets ca_ref ON ca_ref.table_name = cc.foreign_key_table
+            AND ca_ref.schema_name = ca.schema_name
+            AND ca_ref.datasource_id = ca.datasource_id
+          WHERE cc.is_foreign_key = true
+            AND cc.foreign_key_table IS NOT NULL
+            AND cc.asset_id = ANY($1)
+            AND ca_ref.id = ANY($1)
+          LIMIT 200
+        `;
+
+        try {
+          const fkRes = (await this.db.query(fkQuery, [nodeIds])) as any;
+          const fkRows = fkRes.rows ?? [];
+
+          logger.info('Foreign keys fetched for lineage', { count: fkRows.length, dataSourceId });
+
+          edges = fkRows.map((row: any) => ({
+            id: `fk_${row.source_asset_id}_${row.target_asset_id}_${row.source_column}`,
+            from_id: row.source_asset_id,
+            to_id: row.target_asset_id,
+            relationship_type: 'derives_from' as const,
+            confidence_score: 1.0, // FK relationships have 100% confidence
+            metadata: {
+              transformation: `${row.source_column} → ${row.target_column}`,
+              relationship: 'foreign_key',
+              sourceColumn: row.source_column,
+              targetColumn: row.target_column,
+            },
+          }));
+        } catch (error: any) {
+          logger.warn('Could not fetch FK relationships', {
+            error: error.message,
+            code: error.code,
+            dataSourceId
+          });
+        }
+      }
+
+      // Fallback: If still no edges, try to query from data_lineage table
+      if (edges.length === 0 && nodeIds.length > 0) {
+        try {
+          const lineageQuery = `
+            SELECT
+              dl.id::text,
+              dl.source_asset_id::text as from_id,
+              dl.target_asset_id::text as to_id,
+              dl.lineage_type,
+              dl.confidence_score,
+              dl.transformation_logic
+            FROM data_lineage dl
+            WHERE dl.source_asset_id = ANY($1)
+              AND dl.target_asset_id = ANY($1)
+              AND dl.deleted_at IS NULL
+            LIMIT 200
+          `;
+
+          const edgesRes = (await this.db.query(lineageQuery, [nodeIds])) as any;
+          edges = (edgesRes.rows ?? []).map((row: any) => ({
+            id: row.id,
+            from_id: row.from_id,
+            to_id: row.to_id,
+            relationship_type: this.mapLineageTypeToRelationship(row.lineage_type),
+            confidence_score: row.confidence_score || 0.8,
+            metadata: {
+              transformation: row.transformation_logic,
+              lineageType: row.lineage_type,
+            },
+          }));
+
+          logger.info('Edges from data_lineage table', { count: edges.length });
+        } catch (error: any) {
+          logger.warn('Could not fetch data_lineage edges', { error: error.message });
+        }
+      }
+
+      logger.info('Edges generated for lineage', {
+        count: edges.length,
+        fkBased: edges.filter(e => e.id.startsWith('fk_')).length,
+        dataSourceId
+      });
+
+      const metadata = this.generateGraphMetadata(nodes, edges, 0);
+
+      return {
+        nodes,
+        edges,
+        metadata: { ...metadata, cacheHit: false },
+      };
+    } catch (error: any) {
+      logger.error('Failed to build demo graph', {
+        error: error.message,
+        stack: error.stack,
+        code: error.code
+      });
+      return {
+        nodes: [],
+        edges: [],
+        metadata: {
+          totalNodes: 0,
+          totalEdges: 0,
+          nodeTypeDistribution: {},
+          maxDepthReached: 0,
+          queryDuration: 0,
+          cacheHit: false,
+        },
+      };
+    }
+  }
+
+  private mapAssetTypeToLineageType(assetType: string): 'source' | 'bronze' | 'silver' | 'gold' | 'transformation' | 'sink' {
+    // Return the original asset type for frontend compatibility
+    // The frontend expects: 'database', 'schema', 'table', 'column', 'view', 'procedure', 'function'
+    // So we keep table as table, view as view, etc.
+    return assetType.toLowerCase() as any;
+  }
+
+  private mapLineageTypeToRelationship(lineageType: string): 'derives_from' | 'transforms_to' | 'copies_from' | 'aggregates_from' {
+    const typeMap: Record<string, 'derives_from' | 'transforms_to' | 'copies_from' | 'aggregates_from'> = {
+      'derived': 'derives_from',
+      'transformed': 'transforms_to',
+      'copied': 'copies_from',
+      'aggregated': 'aggregates_from',
+    };
+    return typeMap[lineageType?.toLowerCase()] || 'derives_from';
+  }
+
+  /* ── Column-Level Lineage ─────────────────────────────────────────────── */
+
+  async getColumnLineage(
+    assetId: string,
+    columnName: string,
+    depth: number = 2,
+    requestContext: { userId?: string; requestId?: string } = {}
+  ): Promise<{
+    nodes: Array<{ id: string; label: string; type: string; columnName: string; tableName: string; metadata?: any }>;
+    edges: Array<{
+      id: string;
+      source: string;
+      target: string;
+      sourceColumn: string;
+      targetColumn: string;
+      transformation?: string;
+      confidence: number;
+    }>;
+  }> {
+    try {
+      // Get the asset details
+      const assetQuery = `
+        SELECT id, name, table_name, schema_name, data_source_id
+        FROM assets
+        WHERE id = $1
+      `;
+      const assetRes = (await this.db.query(assetQuery, [assetId])) as any;
+      if (!assetRes.rows || assetRes.rows.length === 0) {
+        throw new LineageNotFoundError('Asset', assetId);
+      }
+      const asset = assetRes.rows[0];
+
+      // Get column details
+      const columnQuery = `
+        SELECT
+          cc.column_name,
+          cc.data_type,
+          cc.is_primary_key,
+          cc.is_foreign_key,
+          cc.referenced_table,
+          cc.referenced_column
+        FROM catalog_columns cc
+        WHERE cc.table_name = $1 AND cc.column_name = $2
+        LIMIT 1
+      `;
+      const columnRes = (await this.db.query(columnQuery, [asset.table_name, columnName])) as any;
+      if (!columnRes.rows || columnRes.rows.length === 0) {
+        throw new LineageNotFoundError('Column', columnName);
+      }
+      const column = columnRes.rows[0];
+
+      // Build nodes and edges for column lineage
+      const nodes: any[] = [
+        {
+          id: `${assetId}_${columnName}`,
+          label: columnName,
+          type: 'column',
+          columnName: columnName,
+          tableName: asset.table_name || asset.name,
+          metadata: {
+            dataType: column.data_type,
+            isPrimaryKey: column.is_primary_key,
+            isForeignKey: column.is_foreign_key,
+          },
+        },
+      ];
+
+      const edges: any[] = [];
+
+      // If this is a foreign key, add the referenced column
+      if (column.is_foreign_key && column.referenced_table && column.referenced_column) {
+        const refAssetQuery = `
+          SELECT id, name, table_name
+          FROM assets
+          WHERE table_name = $1
+          LIMIT 1
+        `;
+        const refAssetRes = (await this.db.query(refAssetQuery, [column.referenced_table])) as any;
+
+        if (refAssetRes.rows && refAssetRes.rows.length > 0) {
+          const refAsset = refAssetRes.rows[0];
+          const refNodeId = `${refAsset.id}_${column.referenced_column}`;
+
+          nodes.push({
+            id: refNodeId,
+            label: column.referenced_column,
+            type: 'column',
+            columnName: column.referenced_column,
+            tableName: column.referenced_table,
+            metadata: {
+              isPrimaryKey: true,
+            },
+          });
+
+          edges.push({
+            id: `${assetId}_${columnName}_to_${refNodeId}`,
+            source: `${assetId}_${columnName}`,
+            target: refNodeId,
+            sourceColumn: columnName,
+            targetColumn: column.referenced_column,
+            transformation: 'Foreign Key Reference',
+            confidence: 1.0,
+          });
+        }
+      }
+
+      // Find columns that reference this column (reverse FK)
+      const reverseRefQuery = `
+        SELECT DISTINCT
+          cc.table_name,
+          cc.column_name,
+          cc.data_type,
+          a.id as asset_id
+        FROM catalog_columns cc
+        JOIN assets a ON a.table_name = cc.table_name
+        WHERE cc.referenced_table = $1 AND cc.referenced_column = $2
+        LIMIT 10
+      `;
+      const reverseRefRes = (await this.db.query(reverseRefQuery, [asset.table_name, columnName])) as any;
+
+      if (reverseRefRes.rows) {
+        for (const refRow of reverseRefRes.rows) {
+          const refNodeId = `${refRow.asset_id}_${refRow.column_name}`;
+
+          nodes.push({
+            id: refNodeId,
+            label: refRow.column_name,
+            type: 'column',
+            columnName: refRow.column_name,
+            tableName: refRow.table_name,
+            metadata: {
+              dataType: refRow.data_type,
+              isForeignKey: true,
+            },
+          });
+
+          edges.push({
+            id: `${refNodeId}_to_${assetId}_${columnName}`,
+            source: refNodeId,
+            target: `${assetId}_${columnName}`,
+            sourceColumn: refRow.column_name,
+            targetColumn: columnName,
+            transformation: 'Foreign Key Reference',
+            confidence: 1.0,
+          });
+        }
+      }
+
+      logger.info('Column lineage retrieved', {
+        assetId,
+        columnName,
+        nodesCount: nodes.length,
+        edgesCount: edges.length,
+        requestId: requestContext.requestId,
+      });
+
+      return { nodes, edges };
+    } catch (error) {
+      const err = toError(error);
+      logger.error('Failed to get column lineage', {
+        error: err.message,
+        assetId,
+        columnName,
+        requestId: requestContext.requestId,
+      });
+      if (err instanceof LineageError) throw err;
+      throw new LineageError('Failed to get column lineage', 'COLUMN_LINEAGE_FAILED', 500);
+    }
   }
 }
 

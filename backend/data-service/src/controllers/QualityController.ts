@@ -5,6 +5,9 @@ import { QualityService } from '../services/QualityService';
 import { StatsService } from '../services/StatsService';
 import { ProfilingService } from '../services/ProfilingService';
 import { QualityRuleEngine } from '../services/QualityRuleEngine';
+import { DataHealingService } from '../services/DataHealingService';
+import { QualityImpactAnalysisService } from '../services/QualityImpactAnalysisService';
+import { QualityROIService } from '../services/QualityROIService';
 import { logger } from '../utils/logger';
 
 // Custom error classes
@@ -60,6 +63,9 @@ export class QualityController {
     private statsSvc: StatsService = new StatsService(),
     private profilingSvc: ProfilingService = new ProfilingService(),
     private ruleEngine: QualityRuleEngine = new QualityRuleEngine(),
+    private healingSvc: DataHealingService = new DataHealingService(),
+    private impactSvc: QualityImpactAnalysisService = new QualityImpactAnalysisService(),
+    private roiSvc: QualityROIService = new QualityROIService(),
   ) {}
 
   listRules = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -282,10 +288,13 @@ export class QualityController {
     try {
       const startTime = Date.now();
       const validatedQuery = SummarySchema.parse(req.query);
-      const { timeframe = '7d', dataSourceId } = req.query as { timeframe?: string; dataSourceId?: string };
+      const { timeframe = '7d', dataSourceId, database, databases, assetType } = req.query as { timeframe?: string; dataSourceId?: string; database?: string; databases?: string; assetType?: string };
+
+      // Support both 'databases' (plural, comma-separated) and 'database' (singular) for backwards compatibility
+      const databaseFilter = databases || database;
 
       try {
-        const summary = await this.statsSvc.getQualitySummary(timeframe, dataSourceId);
+        const summary = await this.statsSvc.getQualitySummary(timeframe, dataSourceId, databaseFilter, assetType);
         const processingTime = Date.now() - startTime;
 
         res.json({
@@ -298,7 +307,7 @@ export class QualityController {
         });
       } catch (dbError: any) {
         // Return empty summary if database query fails
-        logger.warn(`Quality summary query failed:`, dbError.message);
+        logger.warn(`Quality summary query failed: ${dbError.message}`, dbError);
 
         const emptySummary = {
           timeframe,
@@ -537,8 +546,9 @@ export class QualityController {
     try {
       const startTime = Date.now();
       const dataSourceId = req.params.id;
+      const { database } = req.body || {};
 
-      logger.info(`Starting data source profiling for ${dataSourceId}`);
+      logger.info(`Starting data source profiling for ${dataSourceId}${database ? ` in database ${database}` : ''}`);
 
       // Validate data source exists
       const dsCheck = await this.svc['db'].query(
@@ -550,8 +560,8 @@ export class QualityController {
         throw new BusinessError('Data source not found', 'NOT_FOUND', 404);
       }
 
-      // Profile all assets in the data source
-      const profiles = await this.profilingSvc.profileDataSource(dataSourceId);
+      // Profile all assets in the data source (with optional database filter)
+      const profiles = await this.profilingSvc.profileDataSource(dataSourceId, database);
       const processingTime = Date.now() - startTime;
 
       // Calculate summary statistics
@@ -606,6 +616,29 @@ export class QualityController {
       });
     } catch (error) {
       next(this.handleError(error, 'getProfileSuggestions'));
+    }
+  };
+
+  // GET /api/quality/profiles/recent - Get recent profile history
+  getRecentProfiles = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const limit = Number(req.query.limit) || 10;
+      const dataSourceId = req.query.dataSourceId as string | undefined;
+
+      logger.info(`Fetching recent profiles (limit: ${limit}, dataSourceId: ${dataSourceId || 'all'})`);
+
+      const profiles = await this.profilingSvc.getRecentProfiles(limit, dataSourceId);
+
+      res.json({
+        success: true,
+        data: profiles,
+        meta: {
+          limit,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'getRecentProfiles'));
     }
   };
 
@@ -766,15 +799,356 @@ export class QualityController {
     }
   };
 
+  // GET /api/quality/business-impact - Get real business impact from quality_results
+  getBusinessImpact = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { dataSourceId, database, databases } = req.query;
+
+      // Calculate business impact from REAL quality_results (failed scans)
+      let query = `
+        SELECT
+          qres.id,
+          qres.status,
+          qres.rows_failed,
+          qr.name as rule_name,
+          qr.dimension,
+          qr.severity,
+          ca.table_name,
+          ca.database_name,
+          qr.asset_id
+        FROM quality_results qres
+        JOIN quality_rules qr ON qr.id = qres.rule_id
+        LEFT JOIN catalog_assets ca ON ca.id = qr.asset_id
+        WHERE qres.status = 'failed'
+          AND qres.run_at > NOW() - INTERVAL '7 days'
+      `;
+
+      const params: any[] = [];
+      let paramCount = 1;
+
+      if (dataSourceId) {
+        query += ` AND qres.data_source_id = $${paramCount++}`;
+        params.push(dataSourceId);
+      }
+
+      const databaseFilter = databases || database;
+      if (databaseFilter) {
+        const databaseList = databaseFilter.split(',').map((d: string) => d.trim()).filter((d: string) => d);
+        if (databaseList.length > 0) {
+          query += ` AND ca.database_name = ANY($${paramCount++}::text[])`;
+          params.push(databaseList);
+        }
+      }
+
+      const result = await this.svc['db'].query(query, params);
+
+      // Calculate business impact from failed scans
+      let totalRevenueImpact = 0;
+      let totalUserImpact = 0;
+      let criticalCount = 0;
+      let highCount = 0;
+      let mediumCount = 0;
+
+      const assetImpacts = new Map();
+
+      result.rows.forEach((row: any) => {
+        const rowsFailed = parseInt(row.rows_failed) || 0;
+        const estimatedRevenuePerRow = 50; // Conservative estimate: $50 per row
+        const revenueImpact = rowsFailed * estimatedRevenuePerRow;
+
+        totalRevenueImpact += revenueImpact;
+        totalUserImpact += rowsFailed; // Each failed row could be a user
+
+        // Count by severity
+        if (row.severity === 'critical') criticalCount++;
+        else if (row.severity === 'high') highCount++;
+        else if (row.severity === 'medium') mediumCount++;
+
+        // Track per asset (use table_name as fallback if asset_id is null)
+        const assetKey = row.asset_id || `table_${row.table_name}_${row.database_name}`;
+        if (assetKey) {
+          if (!assetImpacts.has(assetKey)) {
+            assetImpacts.set(assetKey, {
+              assetId: row.asset_id,
+              tableName: row.table_name,
+              databaseName: row.database_name,
+              severity: row.severity,
+              revenueImpact: 0,
+              userImpact: 0
+            });
+          }
+          const asset = assetImpacts.get(assetKey);
+          asset.revenueImpact += revenueImpact;
+          asset.userImpact += rowsFailed;
+          // Keep highest severity
+          if (row.severity === 'critical') asset.severity = 'critical';
+          else if (row.severity === 'high' && asset.severity !== 'critical') asset.severity = 'high';
+          else if (row.severity === 'medium' && !['critical', 'high'].includes(asset.severity)) asset.severity = 'medium';
+        }
+      });
+
+      res.json({
+        success: true,
+        data: {
+          totalRevenueImpact,
+          totalUserImpact,
+          criticalIssues: criticalCount,
+          highIssues: highCount,
+          mediumIssues: mediumCount,
+          totalFailedScans: result.rows.length,
+          estimatedDowntimeMinutes: (criticalCount * 5) + (highCount * 2),
+          assetsImpacted: assetImpacts.size,
+          assetDetails: Array.from(assetImpacts.values())
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          note: 'Calculated from real quality_results (failed scans). Revenue estimate: $50/row.'
+        }
+      });
+    } catch (error) {
+      next(this.handleError(error, 'getBusinessImpact'));
+    }
+  };
+
+  // GET /api/quality/critical-alerts - Get critical quality alerts from recent failed scans
+  getCriticalAlerts = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { dataSourceId, database, databases, limit = 10 } = req.query;
+
+      // Get recent failed quality results that represent critical issues
+      let query = `
+        SELECT
+          qres.id,
+          qres.status,
+          qres.rows_failed,
+          qres.run_at,
+          qres.execution_time_ms,
+          qr.name as rule_name,
+          qr.dimension,
+          qr.severity,
+          qr.description,
+          ca.table_name,
+          ca.database_name,
+          ca.asset_type,
+          qr.asset_id
+        FROM quality_results qres
+        JOIN quality_rules qr ON qr.id = qres.rule_id
+        LEFT JOIN catalog_assets ca ON ca.id = qr.asset_id
+        WHERE qres.status = 'failed'
+          AND qres.run_at > NOW() - INTERVAL '24 hours'
+      `;
+
+      const params: any[] = [];
+      let paramCount = 1;
+
+      if (dataSourceId) {
+        query += ` AND qres.data_source_id = $${paramCount++}`;
+        params.push(dataSourceId);
+      }
+
+      const databaseFilter = databases || database;
+      if (databaseFilter) {
+        const databaseList = databaseFilter.toString().split(',').map((d: string) => d.trim()).filter((d: string) => d);
+        if (databaseList.length > 0) {
+          query += ` AND ca.database_name = ANY($${paramCount++}::text[])`;
+          params.push(databaseList);
+        }
+      }
+
+      query += ` ORDER BY
+        CASE qr.severity
+          WHEN 'critical' THEN 1
+          WHEN 'high' THEN 2
+          WHEN 'medium' THEN 3
+          ELSE 4
+        END,
+        qres.run_at DESC
+        LIMIT $${paramCount}`;
+      params.push(parseInt(limit as string) || 10);
+
+      const result = await this.svc['db'].query(query, params);
+
+      // Transform results into alert format
+      const alerts = result.rows.map((row: any) => {
+        const rowsFailed = parseInt(row.rows_failed) || 0;
+        const timeAgo = this.getTimeAgo(new Date(row.run_at));
+
+        // Calculate impact estimates
+        const estimatedRevenuePerRow = 50;
+        const revenueImpact = rowsFailed * estimatedRevenuePerRow;
+
+        // Determine if auto-fix is actually available
+        // Empty table checks cannot be auto-fixed (need data insertion, not repair)
+        const isEmptyTableCheck = (row.description || '').toLowerCase().includes('should contain at least one row') ||
+                                   (row.description || '').toLowerCase().includes('table is empty');
+
+        // Auto-fix only available for actual data quality issues, not empty tables
+        const autoFixAvailable = !isEmptyTableCheck &&
+                                  rowsFailed > 0 &&
+                                  (row.severity === 'high' || row.severity === 'critical');
+
+        // Calculate true criticality score (not just empty tables)
+        const criticalityScore = this.calculateCriticalityScore({
+          severity: row.severity,
+          rowsFailed,
+          revenueImpact,
+          isEmptyTable: isEmptyTableCheck
+        });
+
+        return {
+          id: row.id,
+          severity: row.severity || 'high',
+          table: row.table_name || 'unknown',
+          database: row.database_name,
+          issue: row.description || row.rule_name,
+          timestamp: timeAgo,
+          impact: {
+            users: rowsFailed > 0 ? rowsFailed : undefined,
+            revenue: revenueImpact > 0 ? `$${Math.round(revenueImpact / 1000)}K` : undefined,
+            downstream: undefined // Could be calculated from lineage data
+          },
+          autoFixAvailable,
+          confidence: row.severity === 'high' ? 0.92 : 0.87,
+          ruleId: row.id,
+          assetId: row.asset_id,
+          criticalityScore, // Add criticality score for ranking
+          isEmptyTableAlert: isEmptyTableCheck // Flag empty table alerts
+        };
+      });
+
+      // Sort by criticality score (highest first)
+      alerts.sort((a, b) => b.criticalityScore - a.criticalityScore);
+
+      // Calculate alert statistics
+      const trueCriticalAlerts = alerts.filter(a => !a.isEmptyTableAlert && a.criticalityScore >= 60);
+      const emptyTableAlerts = alerts.filter(a => a.isEmptyTableAlert);
+      const lowPriorityAlerts = alerts.filter(a => !a.isEmptyTableAlert && a.criticalityScore < 60);
+
+      res.json({
+        success: true,
+        data: alerts,
+        meta: {
+          timestamp: new Date().toISOString(),
+          count: alerts.length,
+          statistics: {
+            totalAlerts: alerts.length,
+            trueCritical: trueCriticalAlerts.length,
+            emptyTables: emptyTableAlerts.length,
+            lowPriority: lowPriorityAlerts.length,
+            averageCriticalityScore: Math.round(
+              alerts.reduce((sum, a) => sum + a.criticalityScore, 0) / alerts.length
+            )
+          },
+          categories: {
+            critical: {
+              count: trueCriticalAlerts.length,
+              description: 'Actual data quality issues requiring immediate attention',
+              examples: trueCriticalAlerts.slice(0, 3).map(a => ({
+                table: a.table,
+                issue: a.issue,
+                score: a.criticalityScore
+              }))
+            },
+            informational: {
+              count: emptyTableAlerts.length,
+              description: 'Empty table notifications (not actionable quality issues)',
+              note: 'These tables need data population, not quality fixes'
+            },
+            lowPriority: {
+              count: lowPriorityAlerts.length,
+              description: 'Minor quality issues with low business impact'
+            }
+          },
+          note: 'Alerts sorted by criticality score (100 = most critical, 0 = least critical)'
+        }
+      });
+    } catch (error) {
+      next(this.handleError(error, 'getCriticalAlerts'));
+    }
+  };
+
+  // Helper method to format time ago
+  private getTimeAgo(date: Date): string {
+    const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
+
+    if (seconds < 60) return `${seconds} seconds ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
+  }
+
+  /**
+   * Calculate true criticality score for alerts
+   * This helps distinguish between truly critical issues vs informational alerts
+   */
+  private calculateCriticalityScore(params: {
+    severity: string;
+    rowsFailed: number;
+    revenueImpact: number;
+    isEmptyTable: boolean;
+  }): number {
+    let score = 0;
+
+    // Base score from severity
+    const severityScores: { [key: string]: number } = {
+      'critical': 40,
+      'high': 30,
+      'medium': 20,
+      'low': 10
+    };
+    score += severityScores[params.severity] || 10;
+
+    // Empty table alerts are low priority (informational, not critical)
+    if (params.isEmptyTable) {
+      score = Math.min(score, 25); // Cap at 25 for empty tables
+      return score;
+    }
+
+    // Rows failed impact (up to 30 points)
+    if (params.rowsFailed > 10000) {
+      score += 30; // Very high impact
+    } else if (params.rowsFailed > 1000) {
+      score += 25; // High impact
+    } else if (params.rowsFailed > 100) {
+      score += 20; // Medium impact
+    } else if (params.rowsFailed > 10) {
+      score += 15; // Low impact
+    } else if (params.rowsFailed > 0) {
+      score += 10; // Minimal impact
+    }
+
+    // Revenue impact (up to 30 points)
+    if (params.revenueImpact > 100000) {
+      score += 30; // $100K+ at risk
+    } else if (params.revenueImpact > 50000) {
+      score += 25; // $50K+ at risk
+    } else if (params.revenueImpact > 10000) {
+      score += 20; // $10K+ at risk
+    } else if (params.revenueImpact > 1000) {
+      score += 15; // $1K+ at risk
+    } else if (params.revenueImpact > 0) {
+      score += 10; // Some revenue at risk
+    }
+
+    // Total score is 0-100
+    return Math.min(100, score);
+  }
+
   // PATCH /api/quality/issues/:id/status - Update issue status
   updateIssueStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { id } = req.params;
       const { status, notes } = req.body;
 
+      // Set resolved_at when marking as resolved, clear it when reopening
+      const resolvedAt = status === 'resolved' ? 'NOW()' : 'NULL';
+
       const query = `
         UPDATE quality_issues
-        SET status = $1, notes = $2, updated_at = NOW()
+        SET status = $1, notes = $2, resolved_at = ${resolvedAt}, updated_at = NOW()
         WHERE id = $3
         RETURNING *
       `;
@@ -1047,6 +1421,433 @@ LIMIT 1`;
       });
     } catch (error) {
       next(this.handleError(error, 'applyRuleTemplate'));
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════
+  // DATA HEALING ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════
+
+  // POST /api/quality/healing/analyze/:issueId
+  analyzeHealing = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { issueId } = req.params;
+
+      if (!z.string().uuid().safeParse(issueId).success) {
+        throw new ValidationError('Invalid issue ID format');
+      }
+
+      const analysis = await this.healingSvc.analyzeIssue(issueId);
+      const processingTime = Date.now() - startTime;
+
+      logger.info('Healing analysis completed', {
+        issueId,
+        recommendedActions: analysis.recommendedActions.length,
+        processingTimeMs: processingTime,
+      });
+
+      res.json({
+        success: true,
+        data: analysis,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'analyzeHealing'));
+    }
+  };
+
+  // POST /api/quality/healing/heal/:issueId
+  executeHealing = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { issueId } = req.params;
+      const { actionId, dryRun = false, autoApprove = false } = req.body;
+      const userId = (req as any).user?.id || 'system';
+
+      if (!z.string().uuid().safeParse(issueId).success) {
+        throw new ValidationError('Invalid issue ID format');
+      }
+
+      if (!actionId) {
+        throw new ValidationError('actionId is required');
+      }
+
+      const result = await this.healingSvc.healIssue(issueId, actionId, {
+        dryRun,
+        autoApprove,
+        userId,
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      logger.info('Healing executed', {
+        issueId,
+        actionId,
+        success: result.success,
+        rowsAffected: result.rowsAffected,
+        dryRun,
+        processingTimeMs: processingTime,
+      });
+
+      res.json({
+        success: true,
+        data: result,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'executeHealing'));
+    }
+  };
+
+  // POST /api/quality/healing/rollback/:healingId
+  rollbackHealing = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { healingId } = req.params;
+      const userId = (req as any).user?.id || 'system';
+
+      if (!z.string().uuid().safeParse(healingId).success) {
+        throw new ValidationError('Invalid healing ID format');
+      }
+
+      const result = await this.healingSvc.rollbackHealing(healingId);
+      const processingTime = Date.now() - startTime;
+
+      logger.info('Healing rollback completed', {
+        healingId,
+        success: result.success,
+        rowsRestored: result.rowsRestored,
+        userId,
+        processingTimeMs: processingTime,
+      });
+
+      res.json({
+        success: true,
+        data: result,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'rollbackHealing'));
+    }
+  };
+
+  // GET /api/quality/healing/recommendations/:dataSourceId
+  getHealingRecommendations = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { dataSourceId } = req.params;
+
+      if (!z.string().uuid().safeParse(dataSourceId).success) {
+        throw new ValidationError('Invalid data source ID format');
+      }
+
+      const recommendations = await this.healingSvc.getRecommendations(dataSourceId);
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        data: {
+          dataSourceId,
+          recommendations,
+          count: recommendations.length,
+        },
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'getHealingRecommendations'));
+    }
+  };
+
+  // POST /api/quality/healing/batch
+  batchHeal = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { issueIds, actionStrategy = 'recommended', dryRun = false } = req.body;
+      const userId = (req as any).user?.id || 'system';
+
+      if (!Array.isArray(issueIds) || issueIds.length === 0) {
+        throw new ValidationError('issueIds must be a non-empty array');
+      }
+
+      if (issueIds.length > 100) {
+        throw new ValidationError('Maximum 100 issues per batch');
+      }
+
+      const result = await this.healingSvc.batchHeal(issueIds, {
+        actionStrategy,
+        dryRun,
+        userId,
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      logger.info('Batch healing completed', {
+        totalIssues: result.totalIssues,
+        successful: result.successful,
+        failed: result.failed,
+        dryRun,
+        processingTimeMs: processingTime,
+      });
+
+      res.json({
+        success: true,
+        data: result,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'batchHeal'));
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════
+  // IMPACT ANALYSIS ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════
+
+  // GET /api/quality/impact/:issueId
+  analyzeImpact = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { issueId } = req.params;
+      const { maxDepth = 5 } = req.query;
+
+      if (!z.string().uuid().safeParse(issueId).success) {
+        throw new ValidationError('Invalid issue ID format');
+      }
+
+      const impact = await this.impactSvc.analyzeIssueImpact(issueId, {
+        maxDepth: parseInt(maxDepth as string),
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      logger.info('Impact analysis completed', {
+        issueId,
+        impactScore: impact.impactScore,
+        impactedAssets: impact.impactedAssets.length,
+        processingTimeMs: processingTime,
+      });
+
+      res.json({
+        success: true,
+        data: impact,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'analyzeImpact'));
+    }
+  };
+
+  // GET /api/quality/impact/summary/:dataSourceId
+  getImpactSummary = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { dataSourceId } = req.params;
+
+      if (!z.string().uuid().safeParse(dataSourceId).success) {
+        throw new ValidationError('Invalid data source ID format');
+      }
+
+      const summary = await this.impactSvc.getDataSourceImpactSummary(dataSourceId);
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        data: summary,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'getImpactSummary'));
+    }
+  };
+
+  // POST /api/quality/impact/simulate/:issueId
+  simulatePropagation = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { issueId } = req.params;
+      const { timeHorizon = '7d', propagationRate = 0.5 } = req.body;
+
+      if (!z.string().uuid().safeParse(issueId).success) {
+        throw new ValidationError('Invalid issue ID format');
+      }
+
+      const simulation = await this.impactSvc.simulatePropagation(issueId, {
+        timeHorizon,
+        propagationRate: parseFloat(propagationRate),
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        data: simulation,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'simulatePropagation'));
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════
+  // ROI CALCULATOR ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════
+
+  // GET /api/quality/roi/:dataSourceId
+  calculateROI = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { dataSourceId } = req.params;
+      const { period = '30d' } = req.query;
+
+      if (!z.string().uuid().safeParse(dataSourceId).success) {
+        throw new ValidationError('Invalid data source ID format');
+      }
+
+      const roi = await this.roiSvc.calculateDataSourceROI(dataSourceId, period as string);
+      const processingTime = Date.now() - startTime;
+
+      logger.info('ROI calculated', {
+        dataSourceId,
+        period,
+        roi: roi.roi,
+        netBenefit: roi.netBenefit,
+        processingTimeMs: processingTime,
+      });
+
+      res.json({
+        success: true,
+        data: roi,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'calculateROI'));
+    }
+  };
+
+  // GET /api/quality/roi/trend/:dataSourceId
+  getROITrend = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { dataSourceId } = req.params;
+      const { timeframe = '90d', interval = 'weekly' } = req.query;
+
+      if (!z.string().uuid().safeParse(dataSourceId).success) {
+        throw new ValidationError('Invalid data source ID format');
+      }
+
+      const trend = await this.roiSvc.getROITrend(dataSourceId, {
+        timeframe: timeframe as string,
+        interval: interval as 'daily' | 'weekly' | 'monthly',
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        data: trend,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'getROITrend'));
+    }
+  };
+
+  // GET /api/quality/roi/initiative/:dataSourceId/:initiative
+  calculateInitiativeROI = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { dataSourceId, initiative } = req.params;
+
+      if (!z.string().uuid().safeParse(dataSourceId).success) {
+        throw new ValidationError('Invalid data source ID format');
+      }
+
+      const roi = await this.roiSvc.calculateInitiativeROI(dataSourceId, initiative);
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        data: roi,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'calculateInitiativeROI'));
+    }
+  };
+
+  // GET /api/quality/roi/compare
+  compareDataSourceROI = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const startTime = Date.now();
+      const { dataSourceIds } = req.query;
+
+      if (!dataSourceIds || typeof dataSourceIds !== 'string') {
+        throw new ValidationError('dataSourceIds query parameter is required (comma-separated UUIDs)');
+      }
+
+      const ids = dataSourceIds.split(',').map((id: string) => id.trim());
+
+      if (ids.length < 2) {
+        throw new ValidationError('At least 2 data source IDs are required for comparison');
+      }
+
+      if (ids.length > 10) {
+        throw new ValidationError('Maximum 10 data sources can be compared');
+      }
+
+      for (const id of ids) {
+        if (!z.string().uuid().safeParse(id).success) {
+          throw new ValidationError(`Invalid UUID format: ${id}`);
+        }
+      }
+
+      const comparison = await this.roiSvc.compareDataSourceROI(ids);
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        data: comparison,
+        meta: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(this.handleError(error, 'compareDataSourceROI'));
     }
   };
 

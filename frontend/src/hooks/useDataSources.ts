@@ -249,28 +249,42 @@ export function useDataSources() {
       updateItem(id, {
         status: ok ? 'active' : 'error',
         ...(result as any)?.testedAt
-          ? ({ lastTestedAt: (result as any).testedAt } as any)
-          : ({ lastTestedAt: new Date().toISOString() } as any),
+          ? ({ lastTestAt: (result as any).testedAt } as any)
+          : ({ lastTestAt: new Date().toISOString() } as any),
       })
       return result
     } catch (e: any) {
       const msg = toUserMessage(e)
       setLastTests(prev => new Map(prev).set(id, { success: false, message: msg } as any))
-      updateItem(id, { status: 'error', ...( { lastTestedAt: new Date().toISOString() } as any) })
+      updateItem(id, { status: 'error', ...( { lastTestAt: new Date().toISOString() } as any) })
       throw new Error(msg)
     } finally {
       setOp('testing', id, false)
     }
   }, [setOp, updateItem])
 
-  const sync = useCallback(async (id: string): Promise<SyncResult> => {
+  const sync = useCallback(async (id: string, database?: string): Promise<SyncResult> => {
     setOp('syncing', id, true)
     try {
-      const result = await syncDataSource(id)
+      // Optimistic UI: mark as running so the card can reflect activity
+      updateItem(id, { syncStatus: { status: 'running', progress: 1 } as any })
+      const result = await syncDataSource(id, database)
       setLastSyncs(prev => new Map(prev).set(id, result))
-      updateItem(id, result.completedAt
-        ? ({ lastSyncAt: result.completedAt } as any)
-        : ({ lastSyncAt: new Date().toISOString() } as any))
+      // Reflect completion timestamp and final status. Use client NOW to avoid
+      // any clock/serialization drift so the card updates immediately.
+      updateItem(
+        id,
+        {
+          lastSyncAt: new Date().toISOString() as any,
+          syncStatus: {
+            status: (result as any)?.status ?? 'completed',
+            progress: (result as any)?.progress ?? 100,
+            completedAt: (result as any)?.completedAt,
+          } as any,
+        },
+      )
+      // Ensure server-driven fields are reflected
+      await refresh()
       return result
     } catch (e: any) {
       const msg = toUserMessage(e)
@@ -283,11 +297,12 @@ export function useDataSources() {
         errors: [msg],
         startedAt: new Date().toISOString(),
       } as any))
+      updateItem(id, { syncStatus: { status: 'failed', progress: 0 } as any })
       throw new Error(msg)
     } finally {
       setOp('syncing', id, false)
     }
-  }, [setOp, updateItem])
+  }, [setOp, updateItem, refresh])
 
   const listDatabases = useCallback(async (id: string): Promise<string[]> => {
     const r = await listDataSourceDatabases(id)

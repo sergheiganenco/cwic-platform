@@ -33,6 +33,8 @@
   "license": "MIT",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.465.0",
+    "@types/socket.io": "^3.0.1",
+    "@types/ws": "^8.5.10",
     "axios": "^1.6.2",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.7.0",
@@ -56,8 +58,10 @@
     "pg": "^8.16.3",
     "pg-copy-streams": "^7.0.0",
     "redis": "^4.6.10",
+    "socket.io": "^4.8.1",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
+    "ws": "^8.16.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz",
     "zod": "^3.23.8"
   },

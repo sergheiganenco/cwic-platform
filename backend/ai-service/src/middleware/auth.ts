@@ -144,9 +144,34 @@ export const optionalAuth = async (
   next: NextFunction
 ): Promise<void> => {
   try {
+    // In development without JWT_SECRET, just use default dev user
+    if (process.env.NODE_ENV === 'development' && !process.env.JWT_SECRET) {
+      req.user = {
+        id: 'dev-user-id',
+        email: 'dev@localhost',
+        role: 'admin',
+        permissions: ['*']
+      };
+      logger.debug('Auth: using default development user (no JWT_SECRET configured)');
+      return next();
+    }
+
     const { AUTH_COOKIE } = readEnv();
     const token = extractToken(req, AUTH_COOKIE);
-    if (!token) return next();
+
+    // If no token and in development, set a default dev user
+    if (!token) {
+      if (process.env.NODE_ENV === 'development') {
+        req.user = {
+          id: 'dev-user-id',
+          email: 'dev@localhost',
+          role: 'admin',
+          permissions: ['*']
+        };
+        logger.debug('Auth: using default development user');
+      }
+      return next();
+    }
 
     try {
       const payload = verifyToken(token);
@@ -163,9 +188,30 @@ export const optionalAuth = async (
     } catch (e: any) {
       // Do not block optional routes; just log at debug
       logger.debug('Auth: optional token rejected', { reason: e?.message });
+
+      // In development, fall back to default user on token error
+      if (process.env.NODE_ENV === 'development') {
+        req.user = {
+          id: 'dev-user-id',
+          email: 'dev@localhost',
+          role: 'admin',
+          permissions: ['*']
+        };
+        logger.debug('Auth: falling back to default development user');
+      }
     }
     next();
-  } catch {
+  } catch (err) {
+    // If anything fails in optional auth, just continue without user (in dev, set default user)
+    if (process.env.NODE_ENV === 'development') {
+      req.user = {
+        id: 'dev-user-id',
+        email: 'dev@localhost',
+        role: 'admin',
+        permissions: ['*']
+      };
+      logger.debug('Auth: error in optional auth, using default development user');
+    }
     next();
   }
 };

@@ -52,7 +52,8 @@ export interface CommonConnectionFields {
   host?: string;
   port?: number;
   database?: string | number;
-  username?: string;
+  username?: string; // Alias for 'user' - normalized by middleware
+  user?: string;     // Canonical field (PostgreSQL, MySQL, etc. use 'user')
   password?: string;
   schema?: string;
   connectionString?: string;

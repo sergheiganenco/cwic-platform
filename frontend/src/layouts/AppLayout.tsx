@@ -14,7 +14,7 @@ import {
   FileText,
   GitBranch,
   Home,
-  LayoutDashboard, LogOut, Menu, MessageSquare,
+  LayoutDashboard, Lock, LogOut, Menu, MessageSquare,
   Network,
   Package,
   Search,
@@ -110,7 +110,10 @@ const NAV_HIERARCHY: ParentNavItem[] = [
     children: [
       { key: 'governance', label: 'Policies', to: '/governance', icon: FileCheck, permission: 'read:governance' },
       { key: 'compliance', label: 'Compliance', to: '/compliance', icon: CheckCircle, permission: 'read:compliance' },
+      { key: 'pii-settings', label: 'PII Configuration', to: '/pii-settings', icon: Lock, permission: 'read:pii' },
+      { key: 'access-control', label: 'Access Control', to: '/access-control', icon: Shield, permission: 'read:access' },
       { key: 'audit', label: 'Audit Logs', to: '/audit', icon: Package, permission: 'read:audit' },
+      { key: 'evidence', label: 'Evidence Vault', to: '/evidence', icon: FileCheck, permission: 'read:evidence' },
     ],
   },
   {

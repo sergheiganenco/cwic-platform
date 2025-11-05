@@ -82,10 +82,11 @@ const NodeCard: React.FC<{
   type?: string;
   metadata?: any;
   onSelect?: (id: string) => void;
+  onHover?: (id: string | null) => void;
   pulse?: boolean;
   x: number;
   y: number;
-}> = ({ id, name, type, metadata, onSelect, pulse, x, y }) => {
+}> = ({ id, name, type, metadata, onSelect, onHover, pulse, x, y }) => {
   const c = layerColor(type);
   const IconComponent = nodeIcons[type || 'table'] || Database;
 
@@ -109,7 +110,9 @@ const NodeCard: React.FC<{
       whileHover={{ y: -4, scale: 1.05 }}
       whileTap={{ scale: 0.96 }}
       onClick={() => onSelect?.(id)}
-      className={`group absolute w-[280px] -translate-x-1/2 -translate-y-1/2 rounded-xl border-2 border-white/20 bg-gradient-to-br ${c.from} ${c.to} p-4 ${ringClass} ${c.glow} cursor-pointer transition-all duration-300 backdrop-blur-sm`}
+      onMouseEnter={() => onHover?.(id)}
+      onMouseLeave={() => onHover?.(null)}
+      className={`group absolute w-[220px] -translate-x-1/2 -translate-y-1/2 rounded-xl border-2 border-white/20 bg-gradient-to-br ${c.from} ${c.to} p-3 ${ringClass} ${c.glow} cursor-pointer transition-all duration-300 backdrop-blur-sm`}
       style={{ left: x, top: y, opacity }}
     >
       {pulse && (
@@ -117,12 +120,12 @@ const NodeCard: React.FC<{
       )}
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 flex-1 min-w-0">
-          <div className="grid h-10 w-10 place-items-center rounded-lg bg-slate-800/90 ring-2 ring-white/20 text-white flex-shrink-0 shadow-lg">
+          <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-800/90 ring-2 ring-white/20 text-white flex-shrink-0 shadow-lg">
             <IconComponent className="h-5 w-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="truncate text-base font-bold text-white drop-shadow-lg">{name}</div>
-            <div className="mt-1 text-xs text-slate-200 uppercase font-medium tracking-wide">{type ?? "node"}</div>
+            <div className="truncate text-sm font-bold text-white drop-shadow-lg">{name}</div>
+            <div className="mt-0.5 text-[10px] text-slate-200 uppercase font-medium tracking-wide">{type ?? "node"}</div>
           </div>
         </div>
         {metadata?.confidence !== undefined && metadata.confidence < 0.9 && (
@@ -132,7 +135,7 @@ const NodeCard: React.FC<{
 
       {/* Metadata badges */}
       {metadata && (
-        <div className="mt-3 flex items-center gap-2 flex-wrap">
+        <div className="mt-2 flex items-center gap-2 flex-wrap">
           {metadata.rowCount !== undefined && (
             <Chip tone="blue">
               <Activity className="h-3.5 w-3.5" />
@@ -159,7 +162,8 @@ const Edge: React.FC<{
   relationshipType?: string;
   isHighlighted?: boolean;
   isDimmed?: boolean;
-}> = ({ from, to, hot, relationshipType, isHighlighted, isDimmed }) => {
+  onHover?: (hover: boolean) => void;
+}> = ({ from, to, hot, relationshipType, isHighlighted, isDimmed, onHover }) => {
   const midX = (from.x + to.x) / 2;
   const d = `M ${from.x},${from.y} C ${midX},${from.y} ${midX},${to.y} ${to.x},${to.y}`;
 
@@ -191,6 +195,16 @@ const Edge: React.FC<{
           animation: hot ? 'dash 2s linear infinite' : 'none',
           opacity: 0.8
         }}
+      />
+      {/* Invisible hit area for hover interactivity */}
+      <path
+        d={d}
+        strokeWidth={12}
+        stroke="transparent"
+        fill="none"
+        style={{ cursor: 'pointer' }}
+        onMouseEnter={() => onHover?.(true)}
+        onMouseLeave={() => onHover?.(false)}
       />
       {/* Arrowhead */}
       <defs>
@@ -236,6 +250,8 @@ export const CinematicLineageGraph: React.FC<CinematicLineageGraphProps> = ({
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [t, setT] = useState(0); // timeline 0..100
+  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+  const [hoveredEdgeIdx, setHoveredEdgeIdx] = useState<number | null>(null);
 
   // pan/zoom state
   const [view, setView] = useState({ x: 400, y: 200, k: 1 });
@@ -256,8 +272,8 @@ export const CinematicLineageGraph: React.FC<CinematicLineageGraphProps> = ({
 
     // Sort layers
     const sortedLayers = Array.from(layers.keys()).sort((a, b) => a - b);
-    const laneWidth = 450;
-    const nodeSpacing = 180;
+    const laneWidth = 340;
+    const nodeSpacing = 120;
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
@@ -353,6 +369,23 @@ export const CinematicLineageGraph: React.FC<CinematicLineageGraphProps> = ({
   const resetView = useCallback(() => {
     setView({ x: 400, y: 200, k: 1 });
   }, []);
+
+  // Autofit to bounds on data change for compact view
+  useEffect(() => {
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const { minX, minY, maxX, maxY } = layout.bounds;
+    const bw = Math.max(1, maxX - minX + 240);
+    const bh = Math.max(1, maxY - minY + 240);
+    const sx = rect.width / bw;
+    const sy = rect.height / bh;
+    const k = Math.min(1.8, Math.max(0.5, Math.min(sx, sy)));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const x = rect.width / 2 - cx * k;
+    const y = rect.height / 2 - cy * k;
+    setView({ x, y, k });
+  }, [rawNodes, rawEdges, layout.bounds]);
 
   // Viewport size for minimap
   const [vp, setVp] = useState({ w: 1200, h: 800 });
@@ -580,8 +613,9 @@ export const CinematicLineageGraph: React.FC<CinematicLineageGraphProps> = ({
                   to={{ x: B.x, y: B.y }}
                   hot={hotEdge(idx)}
                   relationshipType={edge.relationshipType}
-                  isHighlighted={edge.metadata?.isHighlighted as boolean | undefined}
+                  isHighlighted={(edge.metadata?.isHighlighted as boolean | undefined) || hoveredNode === edge.from || hoveredNode === edge.to || hoveredEdgeIdx === idx}
                   isDimmed={edge.metadata?.isDimmed as boolean | undefined}
+                  onHover={(hover) => setHoveredEdgeIdx(hover ? idx : null)}
                 />
               );
             })}
@@ -600,6 +634,7 @@ export const CinematicLineageGraph: React.FC<CinematicLineageGraphProps> = ({
                 metadata={node.metadata}
                 pulse={selected === id}
                 onSelect={handleNodeSelect}
+                onHover={setHoveredNode}
                 x={x}
                 y={y}
               />

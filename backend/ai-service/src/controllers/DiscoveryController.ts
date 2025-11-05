@@ -1,4 +1,5 @@
 import { AIService, NaturalLanguageQuery } from '@services/AIService';
+import { EnhancedAIService, EnhancedQueryRequest } from '@services/EnhancedAIService';
 import { DiscoveryService, StartDiscoveryRequest } from '@services/DiscoveryService';
 import { APIError } from '@utils/errors';
 import { logger } from '@utils/logger';
@@ -8,10 +9,12 @@ import { NextFunction, Request, Response } from 'express';
 export class DiscoveryController {
   private discoveryService: DiscoveryService;
   private aiService: AIService;
+  private enhancedAIService: EnhancedAIService;
 
   constructor() {
     this.discoveryService = new DiscoveryService();
     this.aiService = new AIService();
+    this.enhancedAIService = new EnhancedAIService();
   }
 
   public startDiscovery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -169,6 +172,110 @@ export class DiscoveryController {
       const explanation = await this.aiService.explainViolation(violation);
 
       res.json(successResponse({ explanation }));
+
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * Enhanced query endpoint with full data context awareness
+   */
+  public processEnhancedQuery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { query, sessionId, conversationHistory, includeContext, preferences } = req.body;
+
+      if (!query || typeof query !== 'string' || !query.trim()) {
+        throw new APIError('Query is required and must be a non-empty string', 400);
+      }
+
+      const request: EnhancedQueryRequest = {
+        query: query.trim(),
+        sessionId,
+        conversationHistory,
+        includeContext: includeContext !== false, // default to true
+        preferences,
+      };
+
+      logger.info('Processing enhanced query', {
+        query: request.query,
+        sessionId: request.sessionId,
+        userId: (req as any).user?.id
+      });
+
+      const result = await this.enhancedAIService.processQuery(request);
+
+      // Format response to match frontend expectations
+      const payload = {
+        message: result.message,
+        type: result.type,
+        results: result.data,
+        sql: result.sql,
+        recommendations: result.recommendations,
+        relatedAssets: result.relatedAssets,
+        confidence: result.confidence,
+        isAiGenerated: result.isAiGenerated,
+      };
+
+      const meta = {
+        processingTime: result.processingTime,
+        sessionId: result.sessionId,
+        model: 'enhanced-ai',
+        timestamp: new Date().toISOString(),
+      };
+
+      res.json(successResponse(payload, 'Query processed successfully', meta));
+
+    } catch (error) {
+      logger.error('Enhanced query processing error:', error);
+      next(error);
+    }
+  };
+
+  /**
+   * Clear conversation history for a session
+   */
+  public clearConversation = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { sessionId } = req.params;
+
+      if (!sessionId) {
+        throw new APIError('Session ID is required', 400);
+      }
+
+      this.enhancedAIService.clearConversation(sessionId);
+
+      logger.info('Conversation cleared', { sessionId, userId: (req as any).user?.id });
+
+      res.json(successResponse(null, 'Conversation cleared successfully'));
+
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * Get conversation history
+   */
+  public getConversation = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { sessionId } = req.params;
+
+      if (!sessionId) {
+        throw new APIError('Session ID is required', 400);
+      }
+
+      const conversation = this.enhancedAIService.getConversation(sessionId);
+
+      if (!conversation) {
+        throw new APIError('Conversation not found', 404);
+      }
+
+      res.json(successResponse({
+        sessionId: conversation.sessionId,
+        messageCount: conversation.messages.length,
+        messages: conversation.messages.slice(-10), // Return last 10 messages
+      }));
 
     } catch (error) {
       next(error);

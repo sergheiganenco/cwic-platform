@@ -59,10 +59,10 @@ export class AdvancedCatalogService extends EventEmitter {
         RETURNING scan_id
       `, [
         config.sourceId,
-        config.scanAll ? 'full' : 'targeted',
+        config.scanAll ? 'full' : 'metadata_only',
         config.databaseNames || [],
-        config.options,
-        'queued',
+        config.options || {},
+        'pending',
         triggeredBy
       ]);
 
@@ -289,7 +289,7 @@ export class AdvancedCatalogService extends EventEmitter {
 
         for (const objRow of objectsResult.rows) {
           const objectType = objRow.table_type === 'BASE TABLE' ? 'table' : 'view';
-          const fqn = `${source.name}.${dbName}.${schemaName}.${objRow.name}`;
+          const fqn = `${sourceId}.${dbName}.${schemaName}.${objRow.name}`;
 
           // Insert object
           await client.query(`
@@ -319,7 +319,7 @@ export class AdvancedCatalogService extends EventEmitter {
 
         for (const routine of routinesResult.rows) {
           const objectType = routine.routine_type === 'PROCEDURE' ? 'stored_procedure' : 'function';
-          const fqn = `${source.name}.${dbName}.${schemaName}.${routine.name}`;
+          const fqn = `${sourceId}.${dbName}.${schemaName}.${routine.name}`;
 
           await client.query(`
             INSERT INTO catalog_objects (
@@ -441,17 +441,12 @@ export class AdvancedCatalogService extends EventEmitter {
       SET
         status = 'completed',
         completed_at = NOW(),
-        duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::INTEGER,
-        objects_scanned = $1,
-        summary = $2
+        objects_discovered = $1,
+        objects_updated = $2
       WHERE scan_id = $3
     `, [
+      progress?.objectsDiscovered || 0,
       progress?.objectsScanned || 0,
-      JSON.stringify({
-        databasesDiscovered: progress?.databasesDiscovered || 0,
-        schemasDiscovered: progress?.schemasDiscovered || 0,
-        objectsDiscovered: progress?.objectsDiscovered || 0
-      }),
       scanId
     ]);
 
@@ -481,14 +476,11 @@ export class AdvancedCatalogService extends EventEmitter {
     return {
       scanId,
       phase: row.status,
-      currentDatabase: row.current_database,
-      currentSchema: row.current_schema,
-      currentObject: row.current_object,
-      objectsScanned: row.objects_scanned,
-      totalObjects: row.total_objects,
-      databasesDiscovered: row.summary?.databasesDiscovered || 0,
-      schemasDiscovered: row.summary?.schemasDiscovered || 0,
-      objectsDiscovered: row.summary?.objectsDiscovered || 0,
+      objectsScanned: row.objects_updated || 0,
+      totalObjects: 0,
+      databasesDiscovered: 0,
+      schemasDiscovered: 0,
+      objectsDiscovered: row.objects_discovered || 0,
       startTime: row.started_at,
       errors: []
     };
@@ -524,9 +516,20 @@ export class AdvancedCatalogService extends EventEmitter {
   }
 
   private async updateScanPhase(scanId: string, phase: string): Promise<void> {
+    // Map phases to valid status values
+    const statusMap: Record<string, string> = {
+      'connecting': 'connecting',
+      'discovering': 'discovering',
+      'profiling': 'profiling',
+      'classifying': 'classifying',
+      'completing': 'completed' // Map completing to completed
+    };
+
+    const status = statusMap[phase] || phase;
+
     await this.db.query(`
-      UPDATE catalog_scan_history SET current_phase = $1, status = $2 WHERE scan_id = $3
-    `, [phase, phase, scanId]);
+      UPDATE catalog_scan_history SET status = $1 WHERE scan_id = $2
+    `, [status, scanId]);
 
     const progress = this.activeScans.get(scanId);
     if (progress) {
@@ -543,9 +546,9 @@ export class AdvancedCatalogService extends EventEmitter {
 
   private async logScanError(scanId: string, severity: string, phase: string, message: string): Promise<void> {
     await this.db.query(`
-      INSERT INTO catalog_scan_errors (scan_id, severity, phase, error_message)
+      INSERT INTO catalog_scan_errors (scan_id, phase, error_message, error_details)
       VALUES ($1, $2, $3, $4)
-    `, [scanId, severity, phase, message]);
+    `, [scanId, phase, message, JSON.stringify({ severity })]);
 
     await this.db.query(`
       UPDATE catalog_scan_history SET error_count = error_count + 1 WHERE scan_id = $1

@@ -344,6 +344,32 @@ export default function DataSourcesPage() {
   )
 
   /* -------------------------- browse databases UI ------------------------- */
+  // Separate function to refresh databases without toggling
+  const refreshDatabases = useCallback(
+    async (id: string) => {
+      // Only refresh if databases are currently being displayed
+      if (!browsedDatabases[id]) return
+
+      try {
+        const params = new URLSearchParams({ dataSourceId: id })
+        const response = await fetch(`/api/catalog/databases?${params}`)
+        const result = await response.json()
+
+        if (result.success && result.data && result.data.length > 0) {
+          const sourceData = result.data[0]
+          setBrowsedDatabases(prev => ({ ...prev, [id]: sourceData.databases }))
+          setSystemDatabasesBySource(prev => ({ ...prev, [id]: sourceData.systemDatabases || [] }))
+        } else {
+          setBrowsedDatabases(prev => ({ ...prev, [id]: [] }))
+          setSystemDatabasesBySource(prev => ({ ...prev, [id]: [] }))
+        }
+      } catch (error) {
+        console.error('Failed to refresh databases:', error)
+      }
+    },
+    [browsedDatabases],
+  )
+
   const handleBrowseDatabases = useCallback(
     async (id: string) => {
       // Toggle: if already loaded, collapse
@@ -458,6 +484,95 @@ export default function DataSourcesPage() {
     },
     [selectedItems, test, sync, remove, refresh],
   )
+
+  /* -------------------- Auto-load databases on mount --------------------- */
+  useEffect(() => {
+    // Auto-load databases for database-capable data sources
+    const databaseCapableTypes = ['postgresql', 'mysql', 'mssql', 'mongodb', 'oracle']
+
+    filteredItems.forEach((ds, index) => {
+      // Only auto-load for database-capable types and if not already loaded/loading
+      if (databaseCapableTypes.includes(ds.type) && !browsedDatabases[ds.id] && !loadingDatabases[ds.id]) {
+        // Use a small staggered delay to avoid overwhelming the server
+        setTimeout(() => {
+          handleBrowseDatabases(ds.id)
+        }, index * 200) // 200ms delay between each request
+      }
+    })
+  }, [filteredItems.map(ds => ds.id).join(',')]) // Re-run when data sources change
+
+  /* -------------------- Real-time polling for updates -------------------- */
+  useEffect(() => {
+    // Poll for data source updates every 30 seconds as a backup to cross-tab sync
+    // Cross-tab sync handles immediate updates, polling catches any missed changes
+    const pollInterval = setInterval(() => {
+      console.log('[DataSources] Background polling...')
+      refresh()
+
+      // Refresh database listings for all currently expanded sources (without toggling)
+      Object.keys(browsedDatabases).forEach((dataSourceId) => {
+        refreshDatabases(dataSourceId)
+      })
+    }, 30000) // Poll every 30 seconds (reduced from 2 seconds)
+
+    // Cleanup on unmount
+    return () => {
+      console.log('[DataSources] Stopping polling')
+      clearInterval(pollInterval)
+    }
+  }, [browsedDatabases, refresh, refreshDatabases])
+
+  /* -------------------- Cross-tab synchronization -------------------- */
+  useEffect(() => {
+    let lastProcessedTimestamp: Record<string, number> = {}
+    let debounceTimer: NodeJS.Timeout | null = null
+
+    const refreshData = () => {
+      console.log('[DataSources] Refreshing data...')
+      refresh()
+
+      // Refresh all expanded database sections
+      Object.keys(browsedDatabases).forEach((dataSourceId) => {
+        refreshDatabases(dataSourceId)
+      })
+    }
+
+    // Listen for storage events from other tabs
+    const handleStorageChange = (e: StorageEvent) => {
+      if ((e.key === 'data-sources-update' || e.key === 'pii-config-update') && e.newValue) {
+        const timestamp = parseInt(e.newValue, 10)
+
+        // Only process if this is a new timestamp we haven't seen for this key
+        if (timestamp > (lastProcessedTimestamp[e.key] || 0)) {
+          lastProcessedTimestamp[e.key] = timestamp
+          console.log('[DataSources] Cross-tab update detected:', e.key)
+
+          // Refresh immediately for instant cross-tab sync
+          refreshData()
+        }
+      }
+    }
+
+    window.addEventListener('storage', handleStorageChange)
+
+    // Also listen for custom events within the same tab
+    const handleCustomUpdate = (e: Event) => {
+      console.log('[DataSources] Same-tab update detected:', e.type)
+
+      // Refresh immediately for instant cross-tab sync
+      refreshData()
+    }
+
+    window.addEventListener('data-sources-update', handleCustomUpdate)
+    window.addEventListener('pii-config-update', handleCustomUpdate)
+
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      window.removeEventListener('storage', handleStorageChange)
+      window.removeEventListener('data-sources-update', handleCustomUpdate)
+      window.removeEventListener('pii-config-update', handleCustomUpdate)
+    }
+  }, [browsedDatabases, refresh, refreshDatabases])
 
   /* --------------------------------- UI ----------------------------------- */
   return (
@@ -989,7 +1104,6 @@ export default function DataSourcesPage() {
                         setConfiguringDataSource(dataSource)
                       }
                     }}
-                    onBrowseDatabases={handleBrowseDatabases}
                   />
 
                 {/* Browse databases per DS - Manual Button to Load */}
