@@ -3,6 +3,7 @@
  */
 import { ModernLineageGraph } from '@/components/lineage/ModernLineageGraph';
 import { CinematicLineageGraph } from '@/components/lineage/CinematicLineageGraph';
+import { RevolutionaryLineageGraph } from '@/components/lineage/RevolutionaryLineageGraph';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
@@ -102,7 +103,7 @@ export default function DataLineage(): JSX.Element {
   const [loading, setLoading] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hoveredNode, setHoveredNode] = useState<HierarchyNode | null>(null);
-  const [graphStyle, setGraphStyle] = useState<'modern' | 'cinematic'>('modern');
+  const [graphStyle, setGraphStyle] = useState<'modern' | 'cinematic' | 'revolutionary'>('revolutionary');
   const [lineageMode, setLineageMode] = useState<'explore' | 'impact' | 'timetravel'>('explore');
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [impactSelectedUrn, setImpactSelectedUrn] = useState<string | null>(null);
@@ -951,6 +952,15 @@ export default function DataLineage(): JSX.Element {
                       >
                         Cinematic
                       </Button>
+                      <Button
+                        variant={graphStyle === 'revolutionary' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setGraphStyle('revolutionary')}
+                        className="hover:scale-105 transition-transform duration-200 bg-gradient-to-r from-purple-600 to-blue-600 text-white"
+                      >
+                        <GitBranch className="mr-2 h-4 w-4" />
+                        Revolutionary
+                      </Button>
                     </div>
                   </div>
                   {graphStyle === 'modern' && (
@@ -1145,7 +1155,9 @@ export default function DataLineage(): JSX.Element {
                 </div>
               ) : graphData.nodes.length > 0 ? (
                 <div className="h-full rounded-lg overflow-hidden animate-in zoom-in duration-700 relative">
-                  {graphStyle === 'modern' ? (
+                  {graphStyle === 'revolutionary' ? (
+                    <RevolutionaryLineageGraph />
+                  ) : graphStyle === 'modern' ? (
                     <>
                       {/* Connection counter overlay */}
                       <div className="absolute top-4 right-4 z-10 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg px-4 py-2 animate-in slide-in-from-top duration-500">
