@@ -1,7 +1,9 @@
 import { HealthController } from '@/controllers/HealthController';
 import { Router } from 'express';
 import analysisRoutes from './analysis';
+import classificationRoutes from './classification';
 import discoveryRoutes from './discovery';
+import fieldDiscoveryRoutes from './fieldDiscovery';
 
 const router = Router();
 const healthController = new HealthController();
@@ -14,6 +16,8 @@ router.get('/health/live', healthController.checkLiveness);
 // Feature routes
 router.use('/discovery', discoveryRoutes);
 router.use('/analysis', analysisRoutes);
+router.use('/field-discovery', fieldDiscoveryRoutes);
+router.use('/classification', classificationRoutes);
 
 // API documentation endpoint
 router.get('/docs', (req, res) => {

@@ -197,7 +197,6 @@ interface DataSourceCardProps {
   onSync: (id: string) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onConfigure?: (id: string) => void
-  onBrowseDatabases?: (id: string) => void
   showAdvanced?: boolean
   syncing?: boolean
 }
@@ -227,7 +226,6 @@ export default function DataSourceCard({
   onSync,
   onDelete,
   onConfigure,
-  onBrowseDatabases,
   showAdvanced = false,
   syncing = false,
 }: DataSourceCardProps) {
@@ -286,20 +284,19 @@ export default function DataSourceCard({
   }, [menuOpen])
 
   const handleAction = useCallback(
-    async (action: 'test' | 'sync' | 'delete' | 'configure' | 'browse') => {
+    async (action: 'test' | 'sync' | 'delete' | 'configure') => {
       try {
         if (action === 'test') await onTest(ds.id)
         else if (action === 'sync') await onSync(ds.id)
         else if (action === 'delete') await onDelete(ds.id)
         else if (action === 'configure') onConfigure?.(ds.id)
-        else if (action === 'browse') onBrowseDatabases?.(ds.id)
       } catch (err) {
         console.error(`[DataSourceCard] ${action} failed`, err)
       } finally {
         setMenuOpen(false)
       }
     },
-    [ds.id, onTest, onSync, onDelete, onConfigure, onBrowseDatabases],
+    [ds.id, onTest, onSync, onDelete, onConfigure],
   )
 
   return (
@@ -378,16 +375,6 @@ export default function DataSourceCard({
                     role="menu"
                     className="absolute right-0 top-10 bg-white border-2 border-gray-200 rounded-xl shadow-2xl z-50 min-w-[180px] overflow-hidden"
                   >
-                    {isServerLevel && (
-                      <button
-                        role="menuitem"
-                        onClick={() => handleAction('browse')}
-                        className="w-full px-4 py-2.5 text-left text-sm hover:bg-blue-50 flex items-center gap-2 border-b border-gray-100"
-                      >
-                        <Database className="w-4 h-4 text-blue-600" />
-                        <span className="font-medium">Browse Databases</span>
-                      </button>
-                    )}
                     <button
                       role="menuitem"
                       onClick={() => handleAction('configure')}
@@ -496,13 +483,15 @@ export default function DataSourceCard({
       </div>
 
       {/* Error */}
-      {hasError && ds.healthStatus?.message && (
-        <div className="mx-6 mb-4 rounded-lg bg-red-50 border border-red-200 p-3">
-          <div className="flex items-start gap-2">
-            <XCircle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
-            <div>
-              <div className="text-sm font-medium text-red-800">Connection Error</div>
-              <div className="text-xs text-red-600 mt-1">{ds.healthStatus.message}</div>
+      {hasError && (ds.healthStatus?.message || (ds as any).lastError) && (
+        <div className="mx-6 mb-4 rounded-lg bg-red-50 border-2 border-red-300 p-4">
+          <div className="flex items-start gap-3">
+            <XCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">
+              <div className="text-sm font-bold text-red-900 mb-1">Connection Error</div>
+              <div className="text-sm text-red-700 leading-relaxed">
+                {ds.healthStatus?.message || (ds as any).lastError}
+              </div>
             </div>
           </div>
         </div>

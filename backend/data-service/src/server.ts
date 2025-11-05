@@ -64,6 +64,20 @@ class Server {
         });
       });
 
+      // Initialize WebSocket server after HTTP server is created
+      // NOTE: Temporarily disabled due to Docker workspace dependency issues
+      // socket.io needs to be properly installed in standalone Docker builds
+      if (typeof (this.app as any).initializeWebSocket === 'function') {
+        try {
+          (this.app as any).initializeWebSocket(this.server);
+          logger.info('🔌 WebSocket server initialized for real-time quality updates');
+        } catch (err: any) {
+          logger.warn('⚠️  WebSocket server initialization skipped (optional feature)', {
+            reason: err?.message || 'socket.io not available'
+          });
+        }
+      }
+
       const lifecycle = this.app as unknown as AppLifecycle;
       Promise.resolve(lifecycle.initialize?.()).catch((err: any) => {
         logger.error('[data-service] App init failed', { message: err?.message, stack: err?.stack });

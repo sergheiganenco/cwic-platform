@@ -13,7 +13,7 @@ export interface ListAssetsQuery {
 
 export const AssetsAPI = {
   list: async (q: ListAssetsQuery) => {
-    const resp = await http.get<ApiListResponse<Asset>>('/catalog/assets', { params: q });
+    const resp = await http.get<ApiListResponse<Asset>>('/api/catalog/assets', { params: q });
     return resp.data;
   },
 

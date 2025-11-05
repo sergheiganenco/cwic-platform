@@ -46,6 +46,7 @@ export interface Asset {
   classification?: 'public' | 'internal' | 'confidential' | 'restricted';
   createdAt: Date;
   updatedAt: Date;
+  piiDetected?: boolean;
   metadata?: {
     rowCount?: number;
     size?: string;

@@ -680,6 +680,7 @@ export class ConnectionTestService {
         SELECT datname
         FROM pg_database
         WHERE datistemplate = false
+          AND datname NOT IN ('postgres', 'template0', 'template1')
         ORDER BY datname;
       `
       const { rows } = await client.query(q)
@@ -710,7 +711,11 @@ export class ConnectionTestService {
     const conn = await createMySQLConnection(cfg)
     try {
       const [rows] = await conn.query('SHOW DATABASES;')
-      return (rows as any[]).map((r) => ({ name: r.Database as string }))
+      // Filter out MySQL system databases
+      const systemDbs = ['mysql', 'information_schema', 'performance_schema', 'sys'];
+      return (rows as any[])
+        .filter((r) => !systemDbs.includes(r.Database.toLowerCase()))
+        .map((r) => ({ name: r.Database as string }))
     } finally {
       await conn.end().catch(() => {})
     }

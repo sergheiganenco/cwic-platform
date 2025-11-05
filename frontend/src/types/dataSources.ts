@@ -993,7 +993,7 @@ export interface DataSource {
   updatedAt: string;
   createdBy: string;
   updatedBy?: string;
-  lastTestedAt?: string;
+  lastTestAt?: string;
   lastSyncAt?: string;
   lastAccessedAt?: string;
   

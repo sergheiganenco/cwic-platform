@@ -25,6 +25,13 @@ export const Alert: React.FC<AlertProps> = ({
   );
 };
 
+export const AlertTitle: React.FC<{
+  children: React.ReactNode;
+  className?: string;
+}> = ({ children, className = '' }) => {
+  return <h5 className={`mb-1 font-medium leading-none tracking-tight ${className}`}>{children}</h5>;
+};
+
 export const AlertDescription: React.FC<{
   children: React.ReactNode;
   className?: string;

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle, Loader2, Sparkles, Shield, Clock, AlertTriangle } from 'lucide-react';
+import { CheckCircle, Loader2, Sparkles, Shield, Clock, AlertTriangle, BarChart3 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Card, CardContent } from '../ui/Card';
 import { Alert, AlertDescription, AlertTitle } from '../ui/Alert';
@@ -21,12 +21,22 @@ interface AutopilotProgress {
 interface Props {
   dataSourceId: string;
   dataSourceName: string;
-  onComplete?: () => void;
+  onComplete?: (result: any) => void;
   onSkip?: () => void;
+  initialStatus?: any;
 }
 
-export function QualityAutopilotOnboarding({ dataSourceId, dataSourceName, onComplete, onSkip }: Props) {
-  const [progress, setProgress] = useState<AutopilotProgress>({ status: 'idle' });
+export function QualityAutopilotOnboarding({ dataSourceId, dataSourceName, onComplete, onSkip, initialStatus }: Props) {
+  const [progress, setProgress] = useState<AutopilotProgress>(
+    initialStatus?.enabled
+      ? {
+          status: 'completed',
+          rulesGenerated: initialStatus.rulesGenerated,
+          nextScan: initialStatus.nextScan,
+          summary: initialStatus.summary
+        }
+      : { status: 'idle' }
+  );
 
   const handleEnableAutopilot = async () => {
     setProgress({ status: 'profiling' });
@@ -49,10 +59,10 @@ export function QualityAutopilotOnboarding({ dataSourceId, dataSourceName, onCom
           summary: result.data.summary
         });
 
-        // Wait 2 seconds then redirect
+        // Wait 2 seconds then call onComplete with result
         setTimeout(() => {
           if (onComplete) {
-            onComplete();
+            onComplete(result.data);
           }
         }, 2000);
       } else {
@@ -224,7 +234,8 @@ export function QualityAutopilotOnboarding({ dataSourceId, dataSourceName, onCom
                 onClick={onComplete}
                 className="bg-green-600 hover:bg-green-700"
               >
-                View Dashboard
+                <BarChart3 className="mr-2 h-5 w-5" />
+                View Quality Metrics
               </Button>
             </div>
           )}

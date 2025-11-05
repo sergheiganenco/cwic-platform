@@ -29,6 +29,7 @@ export interface ColumnProfile {
 export interface AssetProfile {
   assetId: number;
   assetName: string;
+  assetType?: string;
   dataSourceId: string;
   rowCount: number;
   columnCount: number;
@@ -59,9 +60,52 @@ export interface RuleSuggestion {
 
 export class ProfilingService {
   private db: Pool;
+  private pool: Pool;
 
   constructor(dbPool?: Pool) {
     this.db = dbPool || db;
+    this.pool = dbPool || db;
+  }
+
+  /**
+   * Get recent profile history
+   */
+  async getRecentProfiles(limit: number = 10, dataSourceId?: string): Promise<any[]> {
+    let query = `
+      SELECT ca.id::text as asset_id, ca.table_name as asset_name, ca.schema_name,
+             ca.database_name, ca.datasource_id::text as datasource_id,
+             ca.row_count, ca.column_count, ca.quality_score, ca.last_profiled_at as profiled_at
+      FROM catalog_assets ca
+      WHERE ca.last_profiled_at IS NOT NULL
+    `;
+
+    const params: any[] = [];
+    if (dataSourceId) {
+      query += ` AND ca.datasource_id::text = $1`;
+      params.push(dataSourceId);
+    }
+
+    query += ` ORDER BY ca.last_profiled_at DESC LIMIT ${limit}`;
+
+    const result = await this.pool.query(query, params);
+
+    return result.rows.map(row => ({
+      assetId: row.asset_id,
+      assetName: row.asset_name,
+      schemaName: row.schema_name,
+      databaseName: row.database_name,
+      dataSourceId: row.datasource_id,
+      rowCount: row.row_count || 0,
+      columnCount: row.column_count || 0,
+      qualityScore: row.quality_score || 0,
+      profiledAt: row.profiled_at,
+      completeness: 0,
+      uniqueness: 0,
+      validity: 0,
+      consistency: 0,
+      accuracy: 0,
+      timeliness: 0,
+    }));
   }
 
   /**
@@ -191,6 +235,7 @@ export class ProfilingService {
     const profile: AssetProfile = {
       assetId,
       assetName: `${schema_name}.${table_name}`,
+      assetType: asset_type,
       dataSourceId: datasource_id,
       rowCount,
       columnCount: columns.length,
@@ -470,18 +515,28 @@ export class ProfilingService {
   /**
    * Profile entire data source (all assets)
    */
-  async profileDataSource(dataSourceId: string): Promise<AssetProfile[]> {
-    logger.info(`Starting data source profiling for ${dataSourceId}`);
+  async profileDataSource(dataSourceId: string, database?: string): Promise<AssetProfile[]> {
+    logger.info(`Starting data source profiling for ${dataSourceId}${database ? ` in database ${database}` : ''}`);
 
-    // Get all assets for this data source (tables and views)
-    const assetsResult = await this.db.query(
-      `SELECT id, table_name, schema_name, asset_type
+    // Build query with optional database filter and system database exclusion
+    let query = `SELECT id, table_name, schema_name, asset_type, database_name
        FROM catalog_assets
        WHERE datasource_id = $1
        AND asset_type IN ('table', 'view')
-       ORDER BY asset_type, table_name`,
-      [dataSourceId]
-    );
+       AND NOT is_system_database(COALESCE(database_name, schema_name))`;
+
+    const params: any[] = [dataSourceId];
+
+    // Add database filter if specified
+    if (database) {
+      query += ` AND database_name = $2`;
+      params.push(database);
+    }
+
+    query += ` ORDER BY asset_type, table_name`;
+
+    // Get all assets for this data source (tables and views)
+    const assetsResult = await this.db.query(query, params);
 
     logger.info(`Found ${assetsResult.rows.length} assets (${assetsResult.rows.filter(a => a.asset_type === 'table').length} tables, ${assetsResult.rows.filter(a => a.asset_type === 'view').length} views) to profile for data source ${dataSourceId}`);
 
@@ -509,6 +564,7 @@ export class ProfilingService {
         profiles.push({
           assetId: asset.id,
           assetName: `${asset.schema_name}.${asset.table_name}`,
+          assetType: asset.asset_type,
           dataSourceId: dataSourceId,
           rowCount: 0,
           columnCount: 0,

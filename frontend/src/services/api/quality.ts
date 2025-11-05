@@ -1,7 +1,8 @@
 // frontend/src/services/api/quality.ts
 // Complete Quality API Service with all endpoints
 
-const API_BASE = '/api';
+// Use direct service endpoint for better reliability during development
+const API_BASE = import.meta.env.DEV ? 'http://localhost:3002/api' : '/api';
 
 export interface AssetProfile {
   assetId: number;
@@ -55,17 +56,37 @@ export interface QualityRule {
   id: string;
   name: string;
   description?: string;
+  rule_type: string;
   dimension: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
-  ruleType: string;
-  ruleConfig?: any;
+  data_source_id?: string;
+  asset_id?: number;
+  table_name?: string;
+  column_name?: string;
+  expression?: string;
+  threshold?: number;
+  parameters?: any;
   enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+  last_executed_at?: string | null;
+  execution_count?: number;
+  last_result?: {
+    status: 'passed' | 'failed' | 'error';
+    issues_found?: number;
+    pass_rate?: number;
+    execution_time_ms?: number;
+    message?: string;
+    database_type?: string;
+  } | null;
+  // Legacy fields for backwards compatibility
+  ruleType?: string;
+  ruleConfig?: any;
   assetId?: number;
   dataSourceId?: string;
   columnName?: string;
   lastRunAt?: string;
   passRate?: number;
-  executionCount?: number;
   avgExecutionTimeMs?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -188,12 +209,18 @@ class QualityAPI {
     }
   }
 
-  async profileDataSource(dataSourceId: string): Promise<any> {
+  async profileDataSource(dataSourceId: string, database?: string): Promise<any> {
     try {
-      const response = await fetch(`${API_BASE}/quality/profile/datasource/${dataSourceId}`, {
+      const options: RequestInit = {
         method: 'POST',
         headers: this.getAuthHeaders(),
-      });
+      };
+
+      if (database) {
+        options.body = JSON.stringify({ database });
+      }
+
+      const response = await fetch(`${API_BASE}/quality/profile/datasource/${dataSourceId}`, options);
 
       if (!response.ok) {
         throw new Error(`Failed to profile data source: ${response.statusText}`);
@@ -328,11 +355,14 @@ class QualityAPI {
     }
   }
 
-  async executeRule(ruleId: string): Promise<RuleExecutionResult> {
+  async executeRule(ruleId: string, options?: { databaseType?: string }): Promise<RuleExecutionResult> {
     try {
       const response = await fetch(`${API_BASE}/quality/rules/${ruleId}/execute/v2`, {
         method: 'POST',
         headers: this.getAuthHeaders(),
+        body: JSON.stringify({
+          databaseType: options?.databaseType || 'postgresql'
+        }),
       });
 
       if (!response.ok) {
@@ -379,15 +409,20 @@ class QualityAPI {
     status?: string;
     severity?: string;
     dataSourceId?: string;
+    database?: string;
+    databases?: string; // Support multiple databases (comma-separated) like Data Catalog
     assetId?: number;
     page?: number;
     limit?: number;
-  }): Promise<{ issues: QualityIssue[]; total: number }> {
+  }): Promise<{ issues: QualityIssue[]; pagination: { total: number; page: number; limit: number } }> {
     try {
       const params = new URLSearchParams();
       if (filters?.status) params.append('status', filters.status);
       if (filters?.severity) params.append('severity', filters.severity);
       if (filters?.dataSourceId) params.append('dataSourceId', filters.dataSourceId);
+      // Support both singular and plural database parameter (Data Catalog compatibility)
+      if (filters?.databases) params.append('databases', filters.databases);
+      else if (filters?.database) params.append('database', filters.database);
       if (filters?.assetId) params.append('assetId', filters.assetId.toString());
       params.append('page', (filters?.page || 1).toString());
       params.append('limit', (filters?.limit || 50).toString());
@@ -403,7 +438,7 @@ class QualityAPI {
       const data = await response.json();
       return {
         issues: data.data.issues || [],
-        total: data.data.pagination?.total || 0,
+        pagination: data.data.pagination || { total: 0, page: 1, limit: 50 },
       };
     } catch (error) {
       console.error('Get issues error:', error);
@@ -424,6 +459,135 @@ class QualityAPI {
       }
     } catch (error) {
       console.error('Update issue error:', error);
+    }
+  }
+
+  // ============================================================================
+  // SUMMARY ENDPOINTS
+  // ============================================================================
+
+  async getQualitySummary(filters?: {
+    dataSourceId?: string;
+    database?: string;
+    databases?: string; // Support multiple databases (comma-separated) like Data Catalog
+    timeframe?: string;
+    assetType?: string;
+  }): Promise<any> {
+    try {
+      const params = new URLSearchParams();
+      if (filters?.dataSourceId) params.append('dataSourceId', filters.dataSourceId);
+      // Support both singular and plural database parameter (Data Catalog compatibility)
+      if (filters?.databases) params.append('databases', filters.databases);
+      else if (filters?.database) params.append('database', filters.database);
+      if (filters?.timeframe) params.append('timeframe', filters.timeframe);
+      if (filters?.assetType) params.append('assetType', filters.assetType);
+
+      const response = await fetch(`${API_BASE}/quality/summary?${params.toString()}`, {
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get summary: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.data || {};
+    } catch (error) {
+      console.error('Get summary error:', error);
+      return this.getMockSummary();
+    }
+  }
+
+  // ============================================================================
+  // BUSINESS IMPACT ENDPOINT
+  // ============================================================================
+
+  async getBusinessImpact(filters?: {
+    dataSourceId?: string;
+    database?: string;
+    databases?: string;
+  }): Promise<any> {
+    try {
+      const params = new URLSearchParams();
+      if (filters?.dataSourceId) params.append('dataSourceId', filters.dataSourceId);
+      if (filters?.databases) params.append('databases', filters.databases);
+      else if (filters?.database) params.append('database', filters.database);
+
+      const response = await fetch(`${API_BASE}/quality/business-impact?${params.toString()}`, {
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get business impact: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.data || {
+        totalRevenueImpact: 0,
+        totalUserImpact: 0,
+        criticalIssues: 0,
+        highIssues: 0,
+        mediumIssues: 0,
+        totalFailedScans: 0,
+        estimatedDowntimeMinutes: 0,
+        assetsImpacted: 0
+      };
+    } catch (error) {
+      console.error('Get business impact error:', error);
+      return {
+        totalRevenueImpact: 0,
+        totalUserImpact: 0,
+        criticalIssues: 0,
+        highIssues: 0,
+        mediumIssues: 0,
+        totalFailedScans: 0,
+        estimatedDowntimeMinutes: 0,
+        assetsImpacted: 0
+      };
+    }
+  }
+
+  // ============================================================================
+  // CRITICAL ALERTS ENDPOINT
+  // ============================================================================
+
+  async getCriticalAlerts(filters?: {
+    dataSourceId?: string;
+    database?: string;
+    databases?: string;
+    limit?: number;
+  }): Promise<any[]> {
+    try {
+      const params = new URLSearchParams();
+      if (filters?.dataSourceId) params.append('dataSourceId', filters.dataSourceId);
+      if (filters?.database) params.append('database', filters.database);
+      if (filters?.databases) params.append('databases', filters.databases);
+      if (filters?.limit) params.append('limit', filters.limit.toString());
+
+      const response = await fetch(`${API_BASE}/quality/critical-alerts?${params.toString()}`, {
+        headers: {
+          ...this.getAuthHeaders(),
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+
+      if (!response.ok) {
+        console.error('Failed to fetch critical alerts:', response.statusText);
+        return [];
+      }
+
+      const result = await response.json();
+      console.log('[QualityAPI] Critical alerts loaded:', {
+        count: result.data?.length,
+        autoFixAvailable: result.data?.filter((a: any) => a.autoFixAvailable).length,
+        emptyTables: result.data?.filter((a: any) => a.isEmptyTableAlert).length
+      });
+      return result.data || [];
+    } catch (error) {
+      console.error('Error fetching critical alerts:', error);
+      return [];
     }
   }
 
@@ -638,40 +802,180 @@ class QualityAPI {
         id: '1',
         name: 'Customer Email Validation',
         description: 'Ensure all customer emails are valid',
+        rule_type: 'pattern',
         dimension: 'validity',
         severity: 'high',
-        ruleType: 'pattern',
+        data_source_id: 'ds-001',
+        table_name: 'customers',
+        column_name: 'email',
+        expression: "email REGEXP '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z]{2,}$'",
         enabled: true,
-        passRate: 98.5,
-        executionCount: 142,
-        avgExecutionTimeMs: 45,
-        lastRunAt: new Date(Date.now() - 3600000).toISOString(),
+        created_at: new Date(Date.now() - 86400000 * 7).toISOString(),
+        last_executed_at: new Date(Date.now() - 3600000).toISOString(),
+        execution_count: 142,
+        last_result: {
+          status: 'passed',
+          issues_found: 2,
+          pass_rate: 98.5,
+          execution_time_ms: 45,
+          message: 'Rule executed successfully'
+        }
       },
       {
         id: '2',
         name: 'Order ID Uniqueness',
-        description: 'Verify order IDs are unique',
+        description: 'Verify order IDs are unique across the system',
+        rule_type: 'uniqueness',
         dimension: 'uniqueness',
         severity: 'critical',
-        ruleType: 'threshold',
+        data_source_id: 'ds-001',
+        table_name: 'orders',
+        column_name: 'order_id',
+        expression: 'COUNT(DISTINCT order_id) = COUNT(order_id)',
         enabled: true,
-        passRate: 100,
-        executionCount: 89,
-        avgExecutionTimeMs: 32,
-        lastRunAt: new Date(Date.now() - 7200000).toISOString(),
+        created_at: new Date(Date.now() - 86400000 * 14).toISOString(),
+        last_executed_at: new Date(Date.now() - 7200000).toISOString(),
+        execution_count: 89,
+        last_result: {
+          status: 'passed',
+          issues_found: 0,
+          pass_rate: 100,
+          execution_time_ms: 32,
+          message: 'No duplicates found'
+        }
       },
       {
         id: '3',
         name: 'Transaction Date Freshness',
-        description: 'Check transaction data is recent',
+        description: 'Check transaction data is recent (within 30 days)',
+        rule_type: 'freshness',
         dimension: 'freshness',
         severity: 'medium',
-        ruleType: 'freshness_check',
+        data_source_id: 'ds-001',
+        table_name: 'transactions',
+        column_name: 'transaction_date',
+        expression: "DATEDIFF(NOW(), transaction_date) <= 30",
         enabled: false,
-        passRate: 95.2,
-        executionCount: 56,
-        avgExecutionTimeMs: 78,
+        created_at: new Date(Date.now() - 86400000 * 21).toISOString(),
+        last_executed_at: new Date(Date.now() - 86400000 * 2).toISOString(),
+        execution_count: 56,
+        last_result: {
+          status: 'failed',
+          issues_found: 45,
+          pass_rate: 95.2,
+          execution_time_ms: 78,
+          message: 'Found 45 stale records'
+        }
       },
+      {
+        id: '4',
+        name: 'Product Price Range Check',
+        description: 'Ensure product prices are within acceptable range',
+        rule_type: 'range',
+        dimension: 'validity',
+        severity: 'high',
+        data_source_id: 'ds-001',
+        table_name: 'products',
+        column_name: 'price',
+        expression: 'price BETWEEN 0 AND 10000',
+        enabled: true,
+        created_at: new Date(Date.now() - 86400000 * 10).toISOString(),
+        last_executed_at: new Date(Date.now() - 3600000 * 5).toISOString(),
+        execution_count: 234,
+        last_result: {
+          status: 'failed',
+          issues_found: 12,
+          pass_rate: 87.5,
+          execution_time_ms: 120,
+          message: 'Found 12 products with invalid prices'
+        }
+      },
+      {
+        id: '5',
+        name: 'Customer Phone Format',
+        description: 'Validate phone numbers follow E.164 format',
+        rule_type: 'pattern',
+        dimension: 'validity',
+        severity: 'medium',
+        data_source_id: 'ds-001',
+        table_name: 'customers',
+        column_name: 'phone',
+        expression: "phone REGEXP '^\\+[1-9]\\d{1,14}$'",
+        enabled: true,
+        created_at: new Date(Date.now() - 86400000 * 5).toISOString(),
+        last_executed_at: new Date(Date.now() - 3600000 * 2).toISOString(),
+        execution_count: 67,
+        last_result: {
+          status: 'failed',
+          issues_found: 156,
+          pass_rate: 72.3,
+          execution_time_ms: 89,
+          message: 'Found 156 invalid phone numbers'
+        }
+      },
+      {
+        id: '6',
+        name: 'Inventory Count Non-Negative',
+        description: 'Ensure inventory counts are never negative',
+        rule_type: 'range',
+        dimension: 'validity',
+        severity: 'critical',
+        data_source_id: 'ds-001',
+        table_name: 'inventory',
+        column_name: 'quantity',
+        expression: 'quantity >= 0',
+        enabled: true,
+        created_at: new Date(Date.now() - 86400000 * 3).toISOString(),
+        last_executed_at: null,
+        execution_count: 0,
+        last_result: null
+      },
+      {
+        id: '7',
+        name: 'User Account Status Consistency',
+        description: 'Check that deleted accounts have no recent activity',
+        rule_type: 'custom',
+        dimension: 'consistency',
+        severity: 'high',
+        data_source_id: 'ds-001',
+        table_name: 'users',
+        column_name: 'status',
+        expression: "NOT (status = 'deleted' AND last_activity > DATE_SUB(NOW(), INTERVAL 30 DAY))",
+        enabled: true,
+        created_at: new Date(Date.now() - 86400000).toISOString(),
+        last_executed_at: new Date(Date.now() - 3600000 * 8).toISOString(),
+        execution_count: 23,
+        last_result: {
+          status: 'error',
+          issues_found: 0,
+          pass_rate: 0,
+          execution_time_ms: 5,
+          message: 'Connection timeout'
+        }
+      },
+      {
+        id: '8',
+        name: '[Autopilot] Missing Values Check',
+        description: 'Auto-generated rule to detect NULL values in required fields',
+        rule_type: 'completeness',
+        dimension: 'completeness',
+        severity: 'high',
+        data_source_id: 'ds-001',
+        table_name: 'customers',
+        column_name: 'customer_id',
+        expression: 'customer_id IS NOT NULL',
+        enabled: true,
+        created_at: new Date(Date.now() - 3600000 * 4).toISOString(),
+        last_executed_at: new Date(Date.now() - 1800000).toISOString(),
+        execution_count: 12,
+        last_result: {
+          status: 'passed',
+          issues_found: 0,
+          pass_rate: 100,
+          execution_time_ms: 23,
+          message: 'No NULL values found'
+        }
+      }
     ];
   }
 
@@ -715,7 +1019,7 @@ class QualityAPI {
     };
   }
 
-  private getMockIssues(): { issues: QualityIssue[]; total: number } {
+  private getMockIssues(): { issues: QualityIssue[]; pagination: { total: number; page: number; limit: number } } {
     const issues: QualityIssue[] = [
       {
         id: '1',
@@ -755,7 +1059,53 @@ class QualityAPI {
       },
     ];
 
-    return { issues, total: issues.length };
+    return {
+      issues,
+      pagination: {
+        total: issues.length,
+        page: 1,
+        limit: 50
+      }
+    };
+  }
+
+  private getMockSummary(): any {
+    return {
+      overallScore: 82,
+      dimensions: {
+        completeness: 88,
+        accuracy: 79,
+        consistency: 85,
+        validity: 76,
+        uniqueness: 91,
+        freshness: 73
+      },
+      assetCoverage: {
+        totalAssets: 45,
+        monitoredAssets: 38,
+        coveragePercentage: 84
+      },
+      ruleMetrics: {
+        totalRules: 127,
+        activeRules: 98,
+        passedRules: 89,
+        failedRules: 9
+      },
+      issueMetrics: {
+        total: 23,
+        bySeverity: {
+          critical: 2,
+          high: 7,
+          medium: 9,
+          low: 5
+        },
+        byStatus: {
+          open: 15,
+          acknowledged: 6,
+          resolved: 2
+        }
+      }
+    };
   }
 
   private getMockTrends(): QualityTrend[] {

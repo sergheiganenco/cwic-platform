@@ -122,7 +122,9 @@ export const DbProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       // IMPORTANT: keep endpoint consistent with the rest of your app:
       // services/api/dataSources.ts uses '/data-sources'
-      const list = await api.get<PaginatedDataSources>('/api/data-sources', { signal: ctrl.signal })
+      const response = await api.get<PaginatedDataSources>('/api/data-sources', { signal: ctrl.signal })
+      // Handle paginated response structure: { success: true, data: [...], pagination: {...} }
+      const list = (response as any)?.data || response
       setServers(Array.isArray(list) ? list : [])
       setStatus('ready')
     } catch (e: any) {

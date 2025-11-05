@@ -3,6 +3,8 @@ import { Pool } from 'pg';
 import { db } from '../db';
 import { logger } from '../utils/logger';
 import { ConnectorFactory } from './connectors/factory';
+import { decryptConfig, isEncryptedConfig } from '../utils/secrets';
+import { SqlDialectTranslator } from './SqlDialectTranslator';
 
 export interface QualityRule {
   id: string;
@@ -17,6 +19,8 @@ export interface QualityRule {
   ruleConfig: any;
   thresholdConfig?: any;
   enabled: boolean;
+  expression?: string; // SQL expression for the rule
+  dialect?: string; // SQL dialect (postgres, mssql, mysql, oracle)
 }
 
 export interface RuleExecutionResult {
@@ -138,6 +142,37 @@ export class QualityRuleEngine {
   }
 
   /**
+   * Helper method to get decrypted connector configuration from data source
+   */
+  private async getConnectorConfig(dataSourceId: string): Promise<any> {
+    const dsResult = await this.db.query(
+      `SELECT type, host, port, database_name, connection_config FROM data_sources WHERE id = $1`,
+      [dataSourceId]
+    );
+
+    if (!dsResult.rows.length) {
+      throw new Error(`Data source not found: ${dataSourceId}`);
+    }
+
+    const dataSource = dsResult.rows[0];
+    let connectionConfig = dataSource.connection_config;
+
+    // Decrypt if encrypted
+    if (isEncryptedConfig(connectionConfig)) {
+      connectionConfig = decryptConfig(connectionConfig);
+    }
+
+    // Build full config
+    return {
+      type: dataSource.type,
+      host: dataSource.host || connectionConfig.host,
+      port: dataSource.port || connectionConfig.port,
+      database: dataSource.database_name || connectionConfig.database,
+      ...connectionConfig,
+    };
+  }
+
+  /**
    * Execute threshold-based rule (e.g., null_rate < 5%)
    */
   private async executeThresholdRule(rule: QualityRule): Promise<RuleExecutionResult> {
@@ -160,22 +195,12 @@ export class QualityRuleEngine {
     const asset = assetResult.rows[0];
     const { table_name, schema_name, datasource_id } = asset;
 
-    // Get data source connection
-    const dsResult = await this.db.query(
-      `SELECT type, host, port, database_name, connection_config FROM data_sources WHERE id = $1`,
-      [datasource_id]
-    );
-
-    const dataSource = dsResult.rows[0];
-    const connector = ConnectorFactory.create({
-      type: dataSource.type,
-      host: dataSource.host,
-      port: dataSource.port,
-      database: dataSource.database_name,
-      ...dataSource.connection_config,
-    });
+    // Get data source connection with decrypted config
+    const connectorConfig = await this.getConnectorConfig(datasource_id);
+    const connector = ConnectorFactory.createConnector(connectorConfig);
 
     try {
+      await connector.connect();
       const fullTableName = `"${schema_name}"."${table_name}"`;
       const escapedColumn = `"${columnName}"`;
 
@@ -184,24 +209,24 @@ export class QualityRuleEngine {
       let rowsFailed: number = 0;
 
       // Get row count
-      const countResult = await connector.query(`SELECT COUNT(*) as cnt FROM ${fullTableName}`);
+      const countResult = await connector.executeQuery(`SELECT COUNT(*) as cnt FROM ${fullTableName}`);
       rowsChecked = parseInt(countResult.rows[0].cnt);
 
       // Calculate metric based on type
       if (metric === 'null_rate') {
-        const nullResult = await connector.query(
+        const nullResult = await connector.executeQuery(
           `SELECT COUNT(*) - COUNT(${escapedColumn}) as null_count FROM ${fullTableName}`
         );
         rowsFailed = parseInt(nullResult.rows[0].null_count);
         metricValue = rowsChecked > 0 ? rowsFailed / rowsChecked : 0;
       } else if (metric === 'unique_rate') {
-        const uniqueResult = await connector.query(
+        const uniqueResult = await connector.executeQuery(
           `SELECT COUNT(DISTINCT ${escapedColumn}) as unique_count FROM ${fullTableName}`
         );
         const uniqueCount = parseInt(uniqueResult.rows[0].unique_count);
         metricValue = rowsChecked > 0 ? uniqueCount / rowsChecked : 0;
       } else if (metric === 'duplicate_rate') {
-        const dupResult = await connector.query(
+        const dupResult = await connector.executeQuery(
           `SELECT COUNT(*) - COUNT(DISTINCT ${escapedColumn}) as dup_count FROM ${fullTableName}`
         );
         rowsFailed = parseInt(dupResult.rows[0].dup_count);
@@ -227,7 +252,7 @@ export class QualityRuleEngine {
         executionTimeMs: 0,
       };
     } finally {
-      await connector.close();
+      await connector.disconnect();
     }
   }
 
@@ -235,31 +260,80 @@ export class QualityRuleEngine {
    * Execute custom SQL rule
    */
   private async executeSqlRule(rule: QualityRule): Promise<RuleExecutionResult> {
-    const { query, expectZero } = rule.ruleConfig;
+    // Use expression field or fall back to query in ruleConfig
+    let query = rule.expression || rule.ruleConfig?.query;
+    const expectZero = rule.ruleConfig?.expectZero;
+
+    if (!query) {
+      throw new Error('SQL expression is required for SQL rules');
+    }
 
     if (!rule.dataSourceId) {
       throw new Error('Data source ID required for SQL rules');
     }
 
-    const dsResult = await this.db.query(
-      `SELECT type, host, port, database_name, connection_config FROM data_sources WHERE id = $1`,
-      [rule.dataSourceId]
+    // Get data source connection with decrypted config
+    const connectorConfig = await this.getConnectorConfig(rule.dataSourceId);
+    const connector = ConnectorFactory.createConnector(connectorConfig);
+
+    // Get the dialect from the rule (defaults to 'postgres')
+    const ruleDialect = SqlDialectTranslator.getDialectForType(
+      this.getRuleDialect(rule) || 'postgres'
     );
 
-    const dataSource = dsResult.rows[0];
-    const connector = ConnectorFactory.create({
-      type: dataSource.type,
-      host: dataSource.host,
-      port: dataSource.port,
-      database: dataSource.database_name,
-      ...dataSource.connection_config,
-    });
+    // Get the target database dialect
+    const targetDialect = SqlDialectTranslator.getDialectForType(
+      connectorConfig.type
+    );
+
+    // Translate SQL if needed
+    if (SqlDialectTranslator.needsTranslation(query, ruleDialect, targetDialect)) {
+      logger.info(`Translating SQL from ${ruleDialect} to ${targetDialect} for rule ${rule.id}`);
+      query = SqlDialectTranslator.translate(query, ruleDialect, targetDialect);
+      logger.debug(`Original SQL: ${rule.expression}`);
+      logger.debug(`Translated SQL: ${query}`);
+    }
 
     try {
-      const result = await connector.query(query);
-      const rowCount = result.rows.length;
+      await connector.connect();
+      const result = await connector.executeQuery(query);
 
-      const passed = expectZero ? rowCount === 0 : rowCount > 0;
+      // Parse the result to extract failure count
+      let rowsFailed = 0;
+      let rowsChecked = 0;
+      let passed = false;
+
+      if (result.rows.length > 0) {
+        const firstRow = result.rows[0];
+
+        // Check for failed_count or fail_count in the result
+        if ('failed_count' in firstRow) {
+          rowsFailed = parseInt(firstRow.failed_count) || 0;
+        } else if ('fail_count' in firstRow) {
+          rowsFailed = parseInt(firstRow.fail_count) || 0;
+        }
+
+        // Check for total_count or rows_checked
+        if ('total_count' in firstRow) {
+          rowsChecked = parseInt(firstRow.total_count) || 0;
+        } else if ('rows_checked' in firstRow) {
+          rowsChecked = parseInt(firstRow.rows_checked) || 0;
+        }
+
+        // If no explicit counts, use the row count logic
+        if (rowsChecked === 0 && rowsFailed === 0) {
+          const rowCount = result.rows.length;
+          passed = expectZero ? rowCount === 0 : rowCount > 0;
+          rowsChecked = rowCount;
+          rowsFailed = expectZero ? rowCount : 0;
+        } else {
+          // Rule passes if there are no failures
+          passed = rowsFailed === 0;
+        }
+      } else {
+        // No rows returned - passes if expectZero is true
+        passed = expectZero === true;
+      }
 
       return {
         id: '',
@@ -267,13 +341,13 @@ export class QualityRuleEngine {
         dataSourceId: rule.dataSourceId,
         runAt: new Date(),
         status: passed ? 'passed' : 'failed',
-        rowsChecked: rowCount,
-        rowsFailed: expectZero ? rowCount : 0,
+        rowsChecked: rowsChecked,
+        rowsFailed: rowsFailed,
         sampleFailures: result.rows.slice(0, 5),
         executionTimeMs: 0,
       };
     } finally {
-      await connector.close();
+      await connector.disconnect();
     }
   }
 
@@ -293,26 +367,18 @@ export class QualityRuleEngine {
     );
 
     const asset = assetResult.rows[0];
-    const dsResult = await this.db.query(
-      `SELECT type, host, port, database_name, connection_config FROM data_sources WHERE id = $1`,
-      [asset.datasource_id]
-    );
 
-    const dataSource = dsResult.rows[0];
-    const connector = ConnectorFactory.create({
-      type: dataSource.type,
-      host: dataSource.host,
-      port: dataSource.port,
-      database: dataSource.database_name,
-      ...dataSource.connection_config,
-    });
+    // Get data source connection with decrypted config
+    const connectorConfig = await this.getConnectorConfig(asset.datasource_id);
+    const connector = ConnectorFactory.createConnector(connectorConfig);
 
     try {
+      await connector.connect();
       const fullTableName = `"${asset.schema_name}"."${asset.table_name}"`;
       const escapedColumn = `"${columnName}"`;
 
       // Count total rows
-      const totalResult = await connector.query(`SELECT COUNT(*) as cnt FROM ${fullTableName}`);
+      const totalResult = await connector.executeQuery(`SELECT COUNT(*) as cnt FROM ${fullTableName}`);
       const rowsChecked = parseInt(totalResult.rows[0].cnt);
 
       // Count rows NOT matching pattern (failures)
@@ -323,7 +389,7 @@ export class QualityRuleEngine {
           AND ${escapedColumn} !~ $1
       `;
 
-      const failResult = await connector.query(failQuery, [pattern]);
+      const failResult = await connector.executeQuery(failQuery, [pattern]);
       const rowsFailed = parseInt(failResult.rows[0].fail_count);
 
       const metricValue = rowsChecked > 0 ? (rowsChecked - rowsFailed) / rowsChecked : 1;
@@ -343,7 +409,7 @@ export class QualityRuleEngine {
         executionTimeMs: 0,
       };
     } finally {
-      await connector.close();
+      await connector.disconnect();
     }
   }
 
@@ -363,21 +429,13 @@ export class QualityRuleEngine {
     );
 
     const asset = assetResult.rows[0];
-    const dsResult = await this.db.query(
-      `SELECT type, host, port, database_name, connection_config FROM data_sources WHERE id = $1`,
-      [asset.datasource_id]
-    );
 
-    const dataSource = dsResult.rows[0];
-    const connector = ConnectorFactory.create({
-      type: dataSource.type,
-      host: dataSource.host,
-      port: dataSource.port,
-      database: dataSource.database_name,
-      ...dataSource.connection_config,
-    });
+    // Get data source connection with decrypted config
+    const connectorConfig = await this.getConnectorConfig(asset.datasource_id);
+    const connector = ConnectorFactory.createConnector(connectorConfig);
 
     try {
+      await connector.connect();
       const fullTableName = `"${asset.schema_name}"."${asset.table_name}"`;
       const escapedColumn = `"${timestampColumn}"`;
 
@@ -386,7 +444,7 @@ export class QualityRuleEngine {
         FROM ${fullTableName}
       `;
 
-      const result = await connector.query(freshnessQuery);
+      const result = await connector.executeQuery(freshnessQuery);
       const latestTimestamp = result.rows[0].latest_timestamp;
 
       if (!latestTimestamp) {
@@ -417,7 +475,7 @@ export class QualityRuleEngine {
         executionTimeMs: 0,
       };
     } finally {
-      await connector.close();
+      await connector.disconnect();
     }
   }
 
@@ -518,7 +576,7 @@ export class QualityRuleEngine {
       `INSERT INTO quality_results (
         rule_id, asset_id, data_source_id, run_at, status,
         metric_value, threshold_value, rows_checked, rows_failed,
-        execution_time_ms, error_message, sample_failures, anomaly_score
+        execution_time_ms, error, sample_failures, anomaly_score
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING id`,
       [
@@ -651,10 +709,19 @@ export class QualityRuleEngine {
       assetId: row.asset_id,
       dataSourceId: row.data_source_id,
       columnName: row.column_name,
-      ruleType: row.rule_type,
+      ruleType: row.rule_type || row.type, // Support both rule_type and type columns
       ruleConfig: row.rule_config || {},
       thresholdConfig: row.threshold_config,
       enabled: row.enabled,
+      expression: row.expression, // Add the SQL expression field
+      dialect: row.dialect || 'postgres', // SQL dialect
     };
+  }
+
+  /**
+   * Helper: Get the SQL dialect for a rule
+   */
+  private getRuleDialect(rule: QualityRule): string {
+    return rule.dialect || 'postgres';
   }
 }

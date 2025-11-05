@@ -24,6 +24,12 @@ import lineageRoutes from './routes/lineage';
 import qualityRoutes from './routes/quality';
 import requestsRoutes from './routes/requests';
 import statsRoutes from './routes/stats';
+import { createRealtimeQualityRoutes } from './routes/realtimeQuality';
+import { createPIIRoutes } from './routes/pii';
+import { createQualityIssueSummaryRoutes } from './routes/qualityIssueSummary';
+import piiRulesRoutes from './routes/piiRules';
+import piiDiscoveryRoutes from './routes/piiDiscovery';
+import piiExclusionsRoutes from './routes/piiExclusions';
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Helpers
@@ -60,6 +66,8 @@ const healthToBoolean = (v: unknown): boolean => {
 export default class App {
   private readonly app: Express;
   private readonly db: DatabaseService;
+  private realtimeService: any = null; // RealtimeQualityService instance
+  private wsServer: any = null; // QualityWebSocketServer instance
 
   constructor() {
     this.app = express();
@@ -74,6 +82,28 @@ export default class App {
     return this.app;
   }
 
+  /** server.ts calls this after HTTP server is created to initialize WebSocket */
+  public initializeWebSocket(httpServer: any): void {
+    try {
+      const { QualityWebSocketServer } = require('./websocket/QualityWebSocketServer');
+      const redisUrl = process.env.REDIS_URL;
+
+      this.wsServer = new QualityWebSocketServer(httpServer, this.db.pool, redisUrl);
+
+      // Start real-time monitoring
+      this.wsServer.start().then(() => {
+        logger.info('[data-service] ✅ Real-time quality monitoring started');
+      }).catch((err: any) => {
+        logger.error('[data-service] ❌ Failed to start real-time monitoring', { error: err.message });
+      });
+
+      logger.info('[data-service] 🔌 WebSocket server initialized on /ws/quality');
+    } catch (error: any) {
+      logger.error('[data-service] Failed to initialize WebSocket', { error: error.message });
+      throw error;
+    }
+  }
+
   /** server.ts calls this async init after listen (migrations, warmups, etc.) */
   public async initialize(): Promise<void> {
     // Run migrations & any warm-up tasks
@@ -84,6 +114,17 @@ export default class App {
   /** server.ts calls this during shutdown */
   public async cleanup(): Promise<void> {
     try {
+      // Stop WebSocket server and real-time monitoring
+      if (this.wsServer && typeof this.wsServer.stop === 'function') {
+        await this.wsServer.stop();
+        logger.info('[data-service] WebSocket server stopped');
+      }
+
+      // Stop old realtime service if it exists
+      if (this.realtimeService && typeof this.realtimeService.stop === 'function') {
+        this.realtimeService.stop();
+      }
+
       await this.db.close();
       await cleanupMiddleware();
       logger.info('[data-service] cleanup completed');
@@ -141,8 +182,9 @@ export default class App {
           }
         },
         credentials: true,
-        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+        allowedHeaders: '*',  // Allow all headers in development
+        exposedHeaders: ['*'],
         maxAge: 86_400,
       })
     );
@@ -162,7 +204,7 @@ export default class App {
     this.app.use(
       express.json({
         limit: process.env.MAX_REQUEST_SIZE || '10mb',
-        strict: true,
+        strict: false, // Allow primitives like null in request body
       })
     );
     this.app.use(
@@ -263,6 +305,24 @@ export default class App {
     this.app.use('/api', enhancedCatalogRouter);
     this.app.use(enhancedCatalogRouter);
 
+    // Mount real-time quality routes
+    const realtimeQualityRouter = createRealtimeQualityRoutes(this.db.pool);
+    this.app.use('/api/quality/realtime', realtimeQualityRouter);
+    this.app.use('/quality/realtime', realtimeQualityRouter);
+    logger.info('[data-service] ✅ Real-time quality routes mounted');
+
+    // Mount PII detection and data preview routes
+    const piiRouter = createPIIRoutes(this.db.pool);
+    this.app.use('/api/quality/pii', piiRouter);
+    this.app.use('/quality/pii', piiRouter);
+    logger.info('[data-service] ✅ PII detection routes mounted');
+
+    // Mount quality issue summary routes
+    const qualityIssueSummaryRouter = createQualityIssueSummaryRoutes(this.db.pool);
+    this.app.use('/api/quality', qualityIssueSummaryRouter);
+    this.app.use('/quality', qualityIssueSummaryRouter);
+    logger.info('[data-service] ✅ Quality issue summary routes mounted');
+
     // Mount routes with both /api prefix and without (gateway flexibility)
     const routes = [
       { path: '/data-sources', router: dataSourceRoutes },
@@ -272,6 +332,9 @@ export default class App {
       { path: '/requests', router: requestsRoutes },
       { path: '/lineage', router: lineageRoutes },
       { path: '/stats', router: statsRoutes },
+      { path: '/pii-rules', router: piiRulesRoutes },
+      { path: '/pii-discovery', router: piiDiscoveryRoutes },
+      { path: '/pii-exclusions', router: piiExclusionsRoutes },
     ];
 
     routes.forEach(({ path, router }) => {
@@ -279,8 +342,8 @@ export default class App {
       this.app.use(path, router);
     });
 
-    // 404 handler
-    this.app.use('*', (req, res) => {
+    // 404 handler - catch all unmatched routes
+    this.app.use((req, res) => {
       logger.warn('Route not found', {
         method: req.method,
         path: req.originalUrl,

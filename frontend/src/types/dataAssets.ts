@@ -8,6 +8,7 @@ export interface Asset {
   dataSourceId: string;
   dataSourceName?: string; // Name of the data source (server/database)
   dataSourceType?: string; // Type of data source (postgresql, mysql, etc.)
+  databaseName?: string; // Database name within the data source
   schema: string;
   table: string;
   rowCount?: number | null; // Row count for tables/views
@@ -45,6 +46,7 @@ export interface AssetFilters {
   quality?: Asset['quality'];
   classification?: Asset['classification'];
   dataSourceId?: string;
+  database?: string;
   schema?: string;
   tags?: string[];
   objectType?: 'user' | 'system';
@@ -66,6 +68,7 @@ export interface AssetFiltersFromUrl {
   quality?: string;
   classification?: string;
   dataSourceId?: string;
+  database?: string;
   schema?: string;
   tags?: string[];
   objectType?: string;

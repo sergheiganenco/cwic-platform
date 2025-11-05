@@ -56,10 +56,35 @@ export class PostgreSQLConnector extends BaseConnector {
       };
     }
 
+    // For server-level connections (scope: 'server'), determine which database to connect to:
+    // 1. If databases array exists, use the first one
+    // 2. Otherwise use 'postgres' as the default administrative database
+    // 3. For regular connections, use the specified database or empty string
+    let databaseName: string;
+    const scope = anyC.scope ?? (anyC as any).connectionScope;
+    const databases = anyC.databases ?? (anyC as any).databaseList;
+
+    if (scope === 'server') {
+      if (Array.isArray(databases) && databases.length > 0) {
+        databaseName = String(databases[0]);
+      } else {
+        databaseName = 'postgres'; // Default PostgreSQL admin database
+      }
+    } else {
+      databaseName = (c.database as string) ?? anyC.db ?? anyC.database ?? '';
+    }
+
+    // Fallback: if still empty, try anyC.database or default to 'postgres'
+    if (!databaseName) {
+      databaseName = anyC.database ?? 'postgres';
+    }
+
     return {
       host: c.host ?? 'localhost',
-      database: (c.database as string) ?? anyC.db ?? '',
-      user: (c.username as string) ?? anyC.user ?? '',
+      database: databaseName,
+      // Support both 'user' and 'username' fields
+      // Check typed field first (c.username), then anyC for both variants
+      user: (c.username as string) ?? anyC.user ?? anyC.username ?? '',
       password: (c.password as string) ?? '',
       port: c.port ?? 5432,
       ssl: c.ssl ?? false,

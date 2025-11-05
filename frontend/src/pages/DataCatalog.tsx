@@ -16,8 +16,10 @@ import { useDataAssets } from '@/hooks/useDataAssets';
 import { useDataSources } from '@/hooks/useDataSources';
 import {
   AlertCircle,
+  AlertTriangle,
   BookOpen,
   Calendar,
+  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -31,6 +33,7 @@ import {
   RefreshCw,
   Search,
   Share2,
+  Shield,
   Star,
   Table as TableIcon,
   TrendingUp,
@@ -882,14 +885,11 @@ const DataCatalog: React.FC = () => {
                 className="px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 min-w-[200px]"
               >
                 <option value="">All Servers ({uniqueDataSources.length})</option>
-                {uniqueDataSources.map(ds => {
-                  const info = getDataSourceInfo(ds.id);
-                  return (
-                    <option key={ds.id} value={ds.id}>
-                      {ds.name} {info.database && `(${info.database})`}
-                    </option>
-                  );
-                })}
+                {uniqueDataSources.map(ds => (
+                  <option key={ds.id} value={ds.id}>
+                    {ds.name}
+                  </option>
+                ))}
               </select>
 
               <div
@@ -1033,7 +1033,7 @@ const DataCatalog: React.FC = () => {
             {hasActiveFilters && (
               <div className="flex items-center justify-between text-sm">
                 <span className="text-gray-600">
-                  {filteredAssets.length} result{filteredAssets.length !== 1 ? 's' : ''} (filtered)
+                  {pagination.total || 0} result{pagination.total !== 1 ? 's' : ''} found
                 </span>
                 <button
                   onClick={() => {
@@ -1150,6 +1150,7 @@ const DataCatalog: React.FC = () => {
           onQuery={handleQuery}
           onBookmark={handleBookmark}
           onEditDescription={(id, desc) => setDescriptionModal({ open: true, assetId: id, currentDesc: desc, loading: false })}
+          onSelectAsset={setSelectedAsset}
         />
       )}
 
@@ -1513,14 +1514,60 @@ const AssetDetailsPanel: React.FC<{
   onQuery: (id: string) => void;
   onBookmark: (id: string) => void;
   onEditDescription: (id: string, desc: string) => void;
-}> = ({ asset, getDataSourceInfo, onClose, onPreview, onQuery, onBookmark, onEditDescription }) => {
+  onSelectAsset: (asset: any) => void;
+}> = ({ asset, getDataSourceInfo, onClose, onPreview, onQuery, onBookmark, onEditDescription, onSelectAsset }) => {
   const dsInfo = getDataSourceInfo(asset.dataSourceId);
   const trustScore = asset.trustScore || asset.trust_score || asset.qualityScore || asset.quality_score || 0;
+  const [activeTab, setActiveTab] = useState<'overview' | 'columns' | 'lineage' | 'usage'>('overview');
+  const [columns, setColumns] = useState<any[]>([]);
+  const [loadingColumns, setLoadingColumns] = useState(false);
+  const [lineage, setLineage] = useState<any>(null);
+  const [loadingLineage, setLoadingLineage] = useState(false);
+
+  // Reset columns and lineage when asset changes
+  useEffect(() => {
+    setColumns([]);
+    setLineage(null);
+    setLoadingColumns(false);
+    setLoadingLineage(false);
+  }, [asset.id]);
+
+  // Fetch columns when Columns tab is active
+  useEffect(() => {
+    if (activeTab === 'columns' && columns.length === 0 && !loadingColumns) {
+      setLoadingColumns(true);
+      fetch(`/api/catalog/assets/${asset.id}/columns`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) {
+            setColumns(data.data || []);
+          }
+        })
+        .catch(err => console.error('Failed to load columns:', err))
+        .finally(() => setLoadingColumns(false));
+    }
+  }, [activeTab, asset.id, columns.length, loadingColumns]);
+
+  // Fetch lineage when Lineage tab is active
+  useEffect(() => {
+    if (activeTab === 'lineage' && !lineage && !loadingLineage) {
+      setLoadingLineage(true);
+      fetch(`/api/catalog/assets/${asset.id}/lineage`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) {
+            setLineage(data.data);
+          }
+        })
+        .catch(err => console.error('Failed to load lineage:', err))
+        .finally(() => setLoadingLineage(false));
+    }
+  }, [activeTab, asset.id, lineage, loadingLineage]);
 
   return (
     <>
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40" onClick={onClose} />
-      <div className="fixed top-0 right-0 h-full w-full max-w-3xl bg-white shadow-2xl z-50 overflow-y-auto">
+      <div className="fixed top-0 right-0 h-full w-full max-w-4xl bg-white shadow-2xl z-50 overflow-y-auto flex flex-col">
         <div className="sticky top-0 bg-white border-b border-gray-200 p-6">
           <div className="flex items-start justify-between mb-4">
             <div className="flex-1">
@@ -1543,7 +1590,7 @@ const AssetDetailsPanel: React.FC<{
             </button>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex gap-3 mb-4">
             <Button className="flex-1" onClick={() => onPreview(asset.id)}>
               <Eye className="h-4 w-4 mr-2" />
               Preview
@@ -1560,9 +1607,42 @@ const AssetDetailsPanel: React.FC<{
               <Star className={`h-4 w-4 ${asset.isBookmarked ? 'fill-yellow-400 text-yellow-400' : 'text-gray-400'}`} />
             </Button>
           </div>
+
+          {/* Tab Navigation */}
+          <div className="flex border-b border-gray-200">
+            {[
+              { id: 'overview', label: 'Overview', icon: BookOpen },
+              { id: 'columns', label: 'Columns', icon: TableIcon, badge: asset.columnCount },
+              { id: 'lineage', label: 'Lineage', icon: Zap },
+              { id: 'usage', label: 'Usage', icon: TrendingUp }
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`flex items-center gap-2 px-6 py-3 font-medium text-sm border-b-2 transition-colors ${
+                  activeTab === tab.id
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+                }`}
+              >
+                <tab.icon className="h-4 w-4" />
+                <span>{tab.label}</span>
+                {tab.badge !== undefined && (
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                    activeTab === tab.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                  }`}>
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="p-6 space-y-6">
+        {/* Tab Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {activeTab === 'overview' && (
+          <div className="space-y-6">
           <div>
             <h3 className="text-lg font-semibold mb-4">Trust Score</h3>
             <div className="bg-gray-50 rounded-lg p-6">
@@ -1624,6 +1704,372 @@ const AssetDetailsPanel: React.FC<{
               {asset.owner && <MetadataRow label="Owner" value={asset.owner} icon={<Users className="h-4 w-4" />} />}
             </div>
           </div>
+          </div>
+          )}
+
+          {activeTab === 'columns' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-2xl font-bold text-gray-900">Columns ({columns.length})</h3>
+                {columns.length > 0 && (
+                  <span className="text-sm text-gray-600">
+                    {columns.filter((c: any) => c.is_nullable).length} nullable • {columns.filter((c: any) => !c.is_nullable).length} required
+                  </span>
+                )}
+              </div>
+
+              {loadingColumns ? (
+                <div className="flex items-center justify-center py-12">
+                  <RefreshCw className="h-8 w-8 animate-spin text-blue-600" />
+                  <span className="ml-3 text-gray-600">Loading columns...</span>
+                </div>
+              ) : columns.length === 0 ? (
+                <div className="text-center py-12 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
+                  <TableIcon className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+                  <p className="text-gray-600 font-medium">No columns found</p>
+                  <p className="text-sm text-gray-500 mt-1">Column metadata has not been synced yet</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {columns.map((column: any, index: number) => (
+                    <div key={index} className="bg-white border border-gray-200 rounded-lg p-4 hover:border-blue-300 hover:shadow-md transition-all">
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-mono font-semibold text-gray-900">{column.column_name}</span>
+                            {column.is_primary_key && (
+                              <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs font-semibold rounded">PK</span>
+                            )}
+                            {!column.is_nullable && (
+                              <span className="px-2 py-0.5 bg-red-100 text-red-800 text-xs font-semibold rounded">REQUIRED</span>
+                            )}
+                            {/* PII Badge */}
+                            {(column as any).pii_type && (
+                              <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs font-semibold rounded flex items-center gap-1">
+                                <Shield className="w-3 h-3" />
+                                PII: {(column as any).pii_type.toUpperCase()}
+                              </span>
+                            )}
+                            {/* Quality Issue Indicator */}
+                            {(column as any).profile_json?.quality_issues && (column as any).profile_json.quality_issues.length > 0 ? (
+                              <span className="px-2 py-1 bg-red-100 text-red-800 text-xs font-semibold rounded flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                {(column as any).profile_json.quality_issues.length} Issue(s)
+                              </span>
+                            ) : (column as any).pii_type ? (
+                              <span className="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3" />
+                                Protected
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <span className="font-mono bg-gray-100 px-2 py-0.5 rounded">{column.data_type}</span>
+                          </div>
+                        </div>
+                        {/* Action Buttons - Always Visible */}
+                        <div className="flex gap-2 ml-4">
+                          {(column as any).pii_type && (
+                            <button
+                              onClick={() => {
+                                // Navigate to Data Quality page filtered by this column
+                                const params = new URLSearchParams({
+                                  tab: 'profiling',
+                                  assetId: asset.id,
+                                  search: asset.name,
+                                  dataSourceId: asset.dataSourceId || '',
+                                  database: asset.databaseName || ''
+                                });
+                                window.location.href = `/quality?${params.toString()}`;
+                              }}
+                              className="px-3 py-1.5 text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 rounded border border-blue-600 shadow-sm transition-colors"
+                            >
+                              View Issues
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {column.description && (
+                        <p className="text-sm text-gray-700 mt-2">{column.description}</p>
+                      )}
+                      {/* Show PII Protection Details */}
+                      {(column as any).pii_type && (
+                        <div className="mt-2 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                          <div className="flex items-start gap-2">
+                            <Shield className="w-4 h-4 text-purple-600 mt-0.5 flex-shrink-0" />
+                            <div className="text-xs text-purple-900">
+                              <div className="font-semibold mb-1">PII Detected: {(column as any).pii_type}</div>
+                              {(column as any).is_sensitive && (
+                                <div className="text-purple-700">
+                                  This column contains sensitive personal data and requires protection.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'lineage' && (
+            <div className="space-y-4">
+              <h3 className="text-2xl font-bold text-gray-900 mb-4">Data Lineage</h3>
+
+              {loadingLineage ? (
+                <div className="flex items-center justify-center py-12">
+                  <RefreshCw className="h-8 w-8 animate-spin text-blue-600" />
+                  <span className="ml-3 text-gray-600">Loading lineage...</span>
+                </div>
+              ) : lineage ? (
+                <div className="space-y-6">
+                  {lineage.upstream && lineage.upstream.length > 0 && (
+                    <div>
+                      <h4 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                        <ChevronLeft className="h-5 w-5 text-blue-600" />
+                        Upstream Dependencies ({lineage.upstream.length})
+                      </h4>
+                      <div className="space-y-2">
+                        {lineage.upstream.map((item: any, index: number) => (
+                          <button
+                            key={index}
+                            onClick={async () => {
+                              // Fetch full asset details before navigating
+                              try {
+                                console.log('[Upstream Click] Fetching asset:', item.id);
+                                const response = await fetch(`/api/catalog/assets/${item.id}`);
+                                const data = await response.json();
+                                console.log('[Upstream Click] Response:', data);
+
+                                if (data.success && data.data) {
+                                  // Transform snake_case to camelCase and map field names for frontend compatibility
+                                  const asset = {
+                                    ...data.data,
+                                    // Map data source fields
+                                    dataSourceId: data.data.datasource_id || data.data.dataSourceId,
+                                    dataSourceName: data.data.datasource_name || data.data.dataSourceName,
+                                    dataSourceType: data.data.datasource_type || data.data.dataSourceType,
+                                    // Map asset name fields (panel expects 'name' or 'table', API returns 'table_name')
+                                    name: data.data.name || data.data.table_name,
+                                    table: data.data.table || data.data.table_name,
+                                    // Map schema (panel expects 'schema', API returns 'schema_name')
+                                    schema: data.data.schema || data.data.schema_name,
+                                    // Map database name
+                                    databaseName: data.data.database_name || data.data.databaseName,
+                                    // Map other common fields
+                                    trustScore: data.data.trust_score || data.data.trustScore,
+                                    qualityScore: data.data.quality_score || data.data.qualityScore,
+                                  };
+                                  console.log('[Upstream Click] Navigating to asset:', asset.id, asset.name);
+                                  onSelectAsset(asset);
+                                } else {
+                                  console.error('[Upstream Click] Invalid response:', data);
+                                }
+                              } catch (err) {
+                                console.error('[Upstream Click] Error:', err);
+                              }
+                            }}
+                            className="w-full bg-blue-50 border border-blue-200 rounded-lg p-4 hover:bg-blue-100 hover:border-blue-300 transition-all cursor-pointer text-left"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Database className="h-5 w-5 text-blue-600 flex-shrink-0" />
+                              <div className="flex-1">
+                                <div className="font-medium text-gray-900">{item.name || item.table_name}</div>
+                                <div className="text-sm text-gray-600">{item.schema} • {item.type}</div>
+                                {item.metadata?.columns && item.metadata.columns.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    {item.metadata.columns.map((col: any, colIdx: number) => (
+                                      <span key={colIdx} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-blue-300 rounded text-xs font-mono">
+                                        <span className="text-blue-700">{col.from}</span>
+                                        <span className="text-gray-400">→</span>
+                                        <span className="text-blue-900">{col.to}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <ChevronRight className="h-5 w-5 text-blue-600 flex-shrink-0" />
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {lineage.downstream && lineage.downstream.length > 0 && (
+                    <div>
+                      <h4 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                        <ChevronRight className="h-5 w-5 text-green-600" />
+                        Downstream Dependencies ({lineage.downstream.length})
+                      </h4>
+                      <div className="space-y-2">
+                        {lineage.downstream.map((item: any, index: number) => (
+                          <button
+                            key={index}
+                            onClick={async () => {
+                              // Fetch full asset details before navigating
+                              try {
+                                console.log('[Downstream Click] Fetching asset:', item.id);
+                                const response = await fetch(`/api/catalog/assets/${item.id}`);
+                                const data = await response.json();
+                                console.log('[Downstream Click] Response:', data);
+
+                                if (data.success && data.data) {
+                                  // Transform snake_case to camelCase and map field names for frontend compatibility
+                                  const asset = {
+                                    ...data.data,
+                                    // Map data source fields
+                                    dataSourceId: data.data.datasource_id || data.data.dataSourceId,
+                                    dataSourceName: data.data.datasource_name || data.data.dataSourceName,
+                                    dataSourceType: data.data.datasource_type || data.data.dataSourceType,
+                                    // Map asset name fields (panel expects 'name' or 'table', API returns 'table_name')
+                                    name: data.data.name || data.data.table_name,
+                                    table: data.data.table || data.data.table_name,
+                                    // Map schema (panel expects 'schema', API returns 'schema_name')
+                                    schema: data.data.schema || data.data.schema_name,
+                                    // Map database name
+                                    databaseName: data.data.database_name || data.data.databaseName,
+                                    // Map other common fields
+                                    trustScore: data.data.trust_score || data.data.trustScore,
+                                    qualityScore: data.data.quality_score || data.data.qualityScore,
+                                  };
+                                  console.log('[Downstream Click] Navigating to asset:', asset.id, asset.name);
+                                  onSelectAsset(asset);
+                                } else {
+                                  console.error('[Downstream Click] Invalid response:', data);
+                                }
+                              } catch (err) {
+                                console.error('[Downstream Click] Error:', err);
+                              }
+                            }}
+                            className="w-full bg-green-50 border border-green-200 rounded-lg p-4 hover:bg-green-100 hover:border-green-300 transition-all cursor-pointer text-left"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Database className="h-5 w-5 text-green-600 flex-shrink-0" />
+                              <div className="flex-1">
+                                <div className="font-medium text-gray-900">{item.name || item.table_name}</div>
+                                <div className="text-sm text-gray-600">{item.schema} • {item.type}</div>
+                                {item.metadata?.columns && item.metadata.columns.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    {item.metadata.columns.map((col: any, colIdx: number) => (
+                                      <span key={colIdx} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-green-300 rounded text-xs font-mono">
+                                        <span className="text-green-700">{col.from}</span>
+                                        <span className="text-gray-400">→</span>
+                                        <span className="text-green-900">{col.to}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <ChevronRight className="h-5 w-5 text-green-600 flex-shrink-0" />
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {(!lineage.upstream || lineage.upstream.length === 0) && (!lineage.downstream || lineage.downstream.length === 0) && (
+                    <div className="text-center py-12 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
+                      <Zap className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+                      <p className="text-gray-600 font-medium">No lineage data available</p>
+                      <p className="text-sm text-gray-500 mt-1">Lineage relationships have not been discovered yet</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center py-12 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
+                  <Zap className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+                  <p className="text-gray-600 font-medium">No lineage data available</p>
+                  <p className="text-sm text-gray-500 mt-1">Lineage relationships have not been discovered yet</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'usage' && (
+            <div className="space-y-6">
+              <h3 className="text-2xl font-bold text-gray-900 mb-4">Usage & Popularity</h3>
+
+              {/* Metrics Grid */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-gradient-to-br from-blue-50 to-blue-100 border border-blue-200 rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Eye className="h-5 w-5 text-blue-600" />
+                    <span className="text-sm font-medium text-blue-900">Total Views</span>
+                  </div>
+                  <div className="text-3xl font-bold text-blue-900">{asset.viewCount || 0}</div>
+                  <p className="text-xs text-blue-700 mt-2">
+                    {asset.viewCount === 0 ? 'No views yet - be the first to explore!' : 'Views from all users'}
+                  </p>
+                </div>
+
+                <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 border border-yellow-200 rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Star className="h-5 w-5 text-yellow-600" />
+                    <span className="text-sm font-medium text-yellow-900">Bookmarks</span>
+                  </div>
+                  <div className="text-3xl font-bold text-yellow-900">{asset.bookmarkCount || 0}</div>
+                  <p className="text-xs text-yellow-700 mt-2">
+                    {asset.bookmarkCount === 0 ? 'Not bookmarked yet' : `Saved by ${asset.bookmarkCount} user${asset.bookmarkCount > 1 ? 's' : ''}`}
+                  </p>
+                </div>
+              </div>
+
+              {/* Asset Metadata */}
+              <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
+                  <h4 className="font-semibold text-gray-900">Asset Information</h4>
+                </div>
+                <div className="divide-y divide-gray-200">
+                  <div className="px-4 py-3 flex justify-between items-center">
+                    <span className="text-sm font-medium text-gray-600">Type</span>
+                    <span className="text-sm text-gray-900 font-medium uppercase">{asset.type || 'table'}</span>
+                  </div>
+                  <div className="px-4 py-3 flex justify-between items-center">
+                    <span className="text-sm font-medium text-gray-600">Row Count</span>
+                    <span className="text-sm text-gray-900 font-mono">{(asset.rowCount || 0).toLocaleString()}</span>
+                  </div>
+                  <div className="px-4 py-3 flex justify-between items-center">
+                    <span className="text-sm font-medium text-gray-600">Column Count</span>
+                    <span className="text-sm text-gray-900 font-mono">{asset.columnCount || 0}</span>
+                  </div>
+                  <div className="px-4 py-3 flex justify-between items-center">
+                    <span className="text-sm font-medium text-gray-600">Average Rating</span>
+                    <div className="flex items-center gap-2">
+                      <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />
+                      <span className="text-sm text-gray-900 font-medium">
+                        {asset.ratingAvg ? `${asset.ratingAvg.toFixed(1)}/5` : 'Not rated'}
+                      </span>
+                    </div>
+                  </div>
+                  {asset.lastProfiledAt && (
+                    <div className="px-4 py-3 flex justify-between items-center">
+                      <span className="text-sm font-medium text-gray-600">Last Profiled</span>
+                      <span className="text-sm text-gray-900">{new Date(asset.lastProfiledAt).toLocaleDateString()}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Coming Soon Section */}
+              <div className="bg-gradient-to-br from-purple-50 to-indigo-50 border border-purple-200 rounded-lg p-8 text-center">
+                <TrendingUp className="h-12 w-12 text-purple-500 mx-auto mb-3" />
+                <p className="text-purple-900 font-semibold text-lg mb-2">Advanced Analytics Coming Soon</p>
+                <p className="text-sm text-purple-700 mb-4">We're building powerful usage insights for you</p>
+                <div className="flex flex-wrap justify-center gap-3 text-xs text-purple-600">
+                  <span className="bg-white px-3 py-1 rounded-full">Query History</span>
+                  <span className="bg-white px-3 py-1 rounded-full">User Access Patterns</span>
+                  <span className="bg-white px-3 py-1 rounded-full">Peak Usage Times</span>
+                  <span className="bg-white px-3 py-1 rounded-full">Popular Queries</span>
+                  <span className="bg-white px-3 py-1 rounded-full">Performance Metrics</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </>
