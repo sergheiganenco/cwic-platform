@@ -1887,7 +1887,11 @@ function DataLineage(): JSX.Element {
               ) : graphData.nodes.length > 0 ? (
                 <div className="h-full rounded-lg overflow-hidden animate-in zoom-in duration-700 relative">
                   {graphStyle === 'revolutionary' ? (
-                    <RevolutionaryLineageGraph />
+                    <RevolutionaryLineageGraph
+                      nodes={enhancedGraphData.nodes}
+                      edges={enhancedGraphData.edges}
+                      onNodeSelect={(node) => handleNodeClick(node.urn)}
+                    />
                   ) : graphStyle === 'modern' ? (
                     <>
                       {/* Connection counter overlay */}
@@ -1896,19 +1900,22 @@ function DataLineage(): JSX.Element {
                           <GitBranch className="h-4 w-4 text-indigo-600" />
                           <span className="font-semibold text-gray-900">{graphData.edges.length}</span>
                           <span className="text-gray-600">active connection{graphData.edges.length !== 1 ? 's' : ''}</span>
-                        <div className="text-center">
-                          <div className="text-yellow-700 font-semibold text-xs mb-1">Edges</div>
-                          <div className="text-3xl font-bold text-yellow-900">{highlightedPath.edges.length}</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-yellow-700 font-semibold text-xs mb-1">Depth</div>
-                          <div className="text-3xl font-bold text-yellow-900">{highlightedPath.depth}</div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                </Panel>
-              )}
+
+                      <ModernLineageGraph
+                        nodes={enhancedGraphData.nodes}
+                        edges={enhancedGraphData.edges}
+                        onNodeSelect={(node) => handleNodeClick(node.urn)}
+                      />
+                    </>
+                  ) : (
+                    <CinematicLineageGraph
+                      nodes={enhancedGraphData.nodes}
+                      edges={enhancedGraphData.edges}
+                      onNodeSelect={(node) => handleNodeClick(node.urn)}
+                    />
+                  )}
             </ReactFlow>
           )}
         </CardContent>

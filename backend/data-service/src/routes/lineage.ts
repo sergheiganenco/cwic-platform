@@ -12,6 +12,10 @@ r.get('/graph', optionalAuthMiddleware, asyncHandler(ctrl.graph));
 // AI-powered endpoints
 r.post('/ai/suggestions', optionalAuthMiddleware, asyncHandler(ctrl.aiSuggestions));
 r.get('/ai/insights/:tableName', optionalAuthMiddleware, asyncHandler(ctrl.aiInsights));
+
+// Manual connection endpoint
+r.post('/manual-connection', optionalAuthMiddleware, asyncHandler(ctrl.createManualConnection));
+
 // Demo graph from assets (existing endpoint)
 r.get('/graph', optionalAuthMiddleware, asyncHandler(ctrl.graph));
 

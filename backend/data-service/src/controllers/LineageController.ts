@@ -159,4 +159,39 @@ export class LineageController {
 
     res.json({ success: true, data: insights });
   };
+
+  /**
+   * POST /api/lineage/manual-connection
+   * Create a manual lineage connection between two nodes
+   */
+  createManualConnection = async (req: Request, res: Response) => {
+    const { sourceUrn, targetUrn, relationshipType, metadata } = req.body;
+
+    if (!sourceUrn || !targetUrn) {
+      return res.status(400).json({
+        success: false,
+        error: 'sourceUrn and targetUrn are required',
+      });
+    }
+
+    try {
+      const connection = await this.svc.createManualConnection({
+        sourceUrn,
+        targetUrn,
+        relationshipType: relationshipType || 'manual_reference',
+        metadata: {
+          ...metadata,
+          createdBy: (req as any).user?.id || 'unknown',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      res.json({ success: true, data: connection });
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to create manual connection',
+      });
+    }
+  };
 }

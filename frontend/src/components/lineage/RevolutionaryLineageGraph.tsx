@@ -304,10 +304,24 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
 };
 
 // ============================================================================
+// COMPONENT PROPS
+// ============================================================================
+
+export interface RevolutionaryLineageGraphProps {
+  nodes: any[];  // LineageSummaryNode[] from parent
+  edges: any[];  // LineageEdge[] from parent
+  onNodeSelect?: (node: any) => void;
+}
+
+// ============================================================================
 // MAIN COMPONENT
 // ============================================================================
 
-export const RevolutionaryLineageGraph: React.FC = () => {
+export const RevolutionaryLineageGraph: React.FC<RevolutionaryLineageGraphProps> = ({
+  nodes: rawNodes = [],
+  edges: rawEdges = [],
+  onNodeSelect,
+}) => {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
@@ -326,214 +340,153 @@ export const RevolutionaryLineageGraph: React.FC = () => {
   const [manualConnectMode, setManualConnectMode] = useState(false);
   const [showAIAssistant, setShowAIAssistant] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState<AIConnectionSuggestion[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
 
-  // Load initial data
+  // Load and transform real data when props change
   useEffect(() => {
-    loadLineageData();
-  }, [filters.selectedServer, filters.selectedDatabase]);
+    if (rawNodes && rawNodes.length > 0) {
+      transformAndLayoutData(rawNodes, rawEdges);
+    }
+  }, [rawNodes, rawEdges, filters.selectedServer, filters.selectedDatabase]);
 
-  const loadLineageData = async () => {
+  // Transform real data from parent into React Flow format
+  const transformAndLayoutData = useCallback((rawNodes: any[], rawEdges: any[]) => {
     setLoading(true);
     try {
-      // TODO: Replace with actual API call
-      // const response = await fetch('/api/lineage/graph', {
-      //   method: 'POST',
-      //   body: JSON.stringify({
-      //     server: filters.selectedServer,
-      //     database: filters.selectedDatabase,
-      //   }),
-      // });
-      // const data = await response.json();
+      // Convert parent nodes to React Flow format
+      const flowNodes: Node[] = rawNodes.map((node) => ({
+        id: node.id || node.urn || String(Math.random()),
+        type: 'tableNode',
+        position: { x: 0, y: 0 },
+        data: {
+          label: node.name || node.label,
+          database: node.platform || node.database,
+          schema: node.container || node.schema,
+          columns: node.columns || [],
+          rowCount: node.rowCount,
+          issues: node.issues || [],
+        },
+      }));
 
-      // Mock data for demonstration
-      const mockNodes: Node[] = [
-        {
-          id: 'table-1',
-          type: 'tableNode',
-          position: { x: 0, y: 0 },
-          data: {
-            label: 'customers',
-            database: 'sales_db',
-            schema: 'public',
-            columns: [
-              { id: 'col-1', name: 'customer_id', type: 'INTEGER', isPrimaryKey: true },
-              { id: 'col-2', name: 'email', type: 'VARCHAR', nullable: false },
-              { id: 'col-3', name: 'name', type: 'VARCHAR', nullable: false },
-              { id: 'col-4', name: 'created_at', type: 'TIMESTAMP', nullable: false },
-            ],
-            rowCount: 15243,
-          },
+      // Convert parent edges to React Flow format
+      const flowEdges: Edge[] = rawEdges.map((edge) => ({
+        id: edge.id || `${edge.source}-${edge.target}`,
+        source: edge.source,
+        target: edge.target,
+        type: 'custom',
+        data: {
+          label: edge.label || edge.relationshipType,
+          type: edge.relationshipType === 'references' ? 'direct' : 'transformation',
+          confidence: edge.confidence || 1.0,
         },
-        {
-          id: 'table-2',
-          type: 'tableNode',
-          position: { x: 0, y: 0 },
-          data: {
-            label: 'orders',
-            database: 'sales_db',
-            schema: 'public',
-            columns: [
-              { id: 'col-5', name: 'order_id', type: 'INTEGER', isPrimaryKey: true },
-              { id: 'col-6', name: 'customer_id', type: 'INTEGER', isForeignKey: true },
-              { id: 'col-7', name: 'total_amount', type: 'DECIMAL', nullable: false },
-              { id: 'col-8', name: 'order_date', type: 'TIMESTAMP', nullable: false },
-            ],
-            rowCount: 45678,
-          },
-        },
-        {
-          id: 'table-3',
-          type: 'tableNode',
-          position: { x: 0, y: 0 },
-          data: {
-            label: 'order_items',
-            database: 'sales_db',
-            schema: 'public',
-            columns: [
-              { id: 'col-9', name: 'item_id', type: 'INTEGER', isPrimaryKey: true },
-              { id: 'col-10', name: 'order_id', type: 'INTEGER', isForeignKey: true },
-              { id: 'col-11', name: 'product_id', type: 'INTEGER', isForeignKey: true },
-              { id: 'col-12', name: 'quantity', type: 'INTEGER', nullable: false },
-            ],
-            rowCount: 123456,
-          },
-        },
-        {
-          id: 'table-4',
-          type: 'tableNode',
-          position: { x: 0, y: 0 },
-          data: {
-            label: 'products',
-            database: 'sales_db',
-            schema: 'public',
-            columns: [
-              { id: 'col-13', name: 'product_id', type: 'INTEGER', isPrimaryKey: true },
-              { id: 'col-14', name: 'name', type: 'VARCHAR', nullable: false },
-              { id: 'col-15', name: 'price', type: 'DECIMAL', nullable: false },
-            ],
-            rowCount: 8765,
-          },
-        },
-        {
-          id: 'table-5',
-          type: 'tableNode',
-          position: { x: 0, y: 0 },
-          data: {
-            label: 'customer_analytics',
-            database: 'analytics_db',
-            schema: 'public',
-            columns: [
-              { id: 'col-16', name: 'customer_id', type: 'INTEGER', isForeignKey: true },
-              { id: 'col-17', name: 'lifetime_value', type: 'DECIMAL', nullable: false },
-              { id: 'col-18', name: 'segment', type: 'VARCHAR', nullable: false },
-            ],
-            rowCount: 15243,
-            issues: ['No direct FK - pattern matched'],
-          },
-        },
-      ];
+      }));
 
-      const mockEdges: Edge[] = [
-        {
-          id: 'edge-1',
-          source: 'table-1',
-          target: 'table-2',
-          type: 'custom',
-          data: { label: 'customer_id', type: 'direct', confidence: 1.0 },
-        },
-        {
-          id: 'edge-2',
-          source: 'table-2',
-          target: 'table-3',
-          type: 'custom',
-          data: { label: 'order_id', type: 'direct', confidence: 1.0 },
-        },
-        {
-          id: 'edge-3',
-          source: 'table-4',
-          target: 'table-3',
-          type: 'custom',
-          data: { label: 'product_id', type: 'direct', confidence: 1.0 },
-        },
-        {
-          id: 'edge-4',
-          source: 'table-1',
-          target: 'table-5',
-          type: 'custom',
-          data: {
-            label: 'customer_id (pattern match)',
-            type: 'suggested',
-            confidence: 0.85,
-          },
-        },
-      ];
-
-      const layouted = getLayoutedElements(mockNodes, mockEdges);
+      // Apply layout algorithm
+      const layouted = getLayoutedElements(flowNodes, flowEdges);
       setNodes(layouted.nodes);
       setEdges(layouted.edges);
 
-      // Load available filters
+      // Extract unique servers/databases for filters
+      const databases = [...new Set(flowNodes.map(n => n.data.database).filter(Boolean))];
       setFilters((prev) => ({
         ...prev,
-        servers: ['prod-server-1', 'prod-server-2', 'analytics-server'],
-        databases: ['sales_db', 'analytics_db', 'warehouse_db'],
+        databases,
       }));
 
-      // Load AI suggestions
+      // Load AI suggestions for missing connections
       loadAISuggestions();
     } catch (error) {
-      console.error('Failed to load lineage data:', error);
+      console.error('Failed to transform lineage data:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const loadAISuggestions = async () => {
-    // TODO: Replace with actual API call
-    const mockSuggestions: AIConnectionSuggestion[] = [
-      {
-        id: 'sugg-1',
-        sourceTable: 'customer_analytics',
-        targetTable: 'customer_segments',
-        confidence: 0.92,
-        reason: 'Both tables have customer_id column with matching data types and similar cardinality',
-        matchingColumns: [
-          { source: 'customer_id', target: 'customer_id', similarity: 1.0 },
-          { source: 'segment', target: 'segment_name', similarity: 0.78 },
-        ],
-        suggestedJoinType: 'left',
-      },
-      {
-        id: 'sugg-2',
-        sourceTable: 'orders',
-        targetTable: 'shipping_info',
-        confidence: 0.87,
-        reason: 'Pattern matching found order_id in both tables with 98% join success rate in sample data',
-        matchingColumns: [{ source: 'order_id', target: 'order_id', similarity: 1.0 }],
-        suggestedJoinType: 'inner',
-      },
-    ];
+    try {
+      // Call real backend API for AI suggestions
+      const response = await fetch('/api/lineage/ai/suggestions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          dataSourceId: filters.selectedDataSource || 'default',
+          server: filters.selectedServer || undefined,
+          database: filters.selectedDatabase || undefined,
+          minConfidence: 0.7,
+          maxSuggestions: 20,
+          analyzeSampleData: false,
+        }),
+      });
 
-    setAiSuggestions(mockSuggestions);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && Array.isArray(data.data)) {
+          setAiSuggestions(data.data);
+          console.log(`Loaded ${data.data.length} AI suggestions from backend`);
+        } else {
+          console.warn('Invalid AI suggestions response format', data);
+          setAiSuggestions([]);
+        }
+      } else {
+        console.warn('Failed to load AI suggestions:', response.statusText);
+        setAiSuggestions([]);
+      }
+    } catch (error) {
+      console.error('Error loading AI suggestions:', error);
+      setAiSuggestions([]);
+    }
   };
 
   const onConnect = useCallback(
-    (params: Connection) => {
+    async (params: Connection) => {
       const newEdge: Edge = {
         ...params,
         id: `edge-manual-${Date.now()}`,
         type: 'custom',
         data: { type: 'manual', confidence: 1.0, label: 'Manual connection' },
       };
+
+      // Add to UI immediately for better UX
       setEdges((eds) => addEdge(newEdge, eds));
 
-      // TODO: Save to backend
-      console.log('Manual connection created:', newEdge);
+      // Save to backend
+      try {
+        const sourceNode = nodes.find((n) => n.id === params.source);
+        const targetNode = nodes.find((n) => n.id === params.target);
+
+        if (sourceNode && targetNode) {
+          const response = await fetch('/api/lineage/manual-connection', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              sourceUrn: sourceNode.data.urn || sourceNode.id,
+              targetUrn: targetNode.data.urn || targetNode.id,
+              relationshipType: 'manual_reference',
+              metadata: {
+                createdBy: 'user',
+                confidence: 1.0,
+                label: 'Manual connection',
+              },
+            }),
+          });
+
+          if (response.ok) {
+            console.log('Manual connection saved to backend:', newEdge.id);
+          } else {
+            console.warn('Failed to save manual connection to backend:', response.statusText);
+          }
+        }
+      } catch (error) {
+        console.error('Error saving manual connection:', error);
+      }
     },
-    [setEdges]
+    [setEdges, nodes]
   );
 
   const handleApplySuggestion = (suggestion: AIConnectionSuggestion) => {
@@ -561,10 +514,17 @@ export const RevolutionaryLineageGraph: React.FC = () => {
 
   const handleNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
-  }, []);
+    // Call parent's onNodeSelect if provided
+    if (onNodeSelect) {
+      onNodeSelect(node);
+    }
+  }, [onNodeSelect]);
 
   const handleRefresh = () => {
-    loadLineageData();
+    // Refresh by re-transforming the data
+    if (rawNodes && rawNodes.length > 0) {
+      transformAndLayoutData(rawNodes, rawEdges);
+    }
   };
 
   const handleToggleFullscreen = () => {
