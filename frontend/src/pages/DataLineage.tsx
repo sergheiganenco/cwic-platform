@@ -1887,7 +1887,11 @@ function DataLineage(): JSX.Element {
               ) : graphData.nodes.length > 0 ? (
                 <div className="h-full rounded-lg overflow-hidden animate-in zoom-in duration-700 relative">
                   {graphStyle === 'revolutionary' ? (
-                    <RevolutionaryLineageGraph />
+                    <RevolutionaryLineageGraph
+                      nodes={enhancedGraphData.nodes}
+                      edges={enhancedGraphData.edges}
+                      onNodeSelect={(node) => handleNodeClick(node.urn)}
+                    />
                   ) : graphStyle === 'modern' ? (
                     <>
                       {/* Connection counter overlay */}
