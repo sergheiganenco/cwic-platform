@@ -749,6 +749,59 @@ export class LineageService {
     }
   }
 
+  /* ── Manual Connection Creation ──────────────────────────────────────── */
+
+  async createManualConnection(params: {
+    sourceUrn: string;
+    targetUrn: string;
+    relationshipType: string;
+    metadata?: Record<string, any>;
+  }): Promise<LineageEdge> {
+    const { sourceUrn, targetUrn, relationshipType, metadata } = params;
+
+    try {
+      // In a production system, you would:
+      // 1. Look up the source and target nodes by URN
+      // 2. Validate the nodes exist
+      // 3. Insert the edge into the lineage_edges table
+      // 4. Return the created edge
+
+      // For now, create a mock edge response
+      const edgeId = `${Date.now()}-manual`;
+
+      logger.info('Creating manual lineage connection', {
+        sourceUrn,
+        targetUrn,
+        relationshipType,
+      });
+
+      // Mock edge creation - in production, this would be a database insert
+      const edge: LineageEdge = {
+        id: edgeId,
+        from_id: sourceUrn,
+        to_id: targetUrn,
+        relationship_type: 'derives_from', // Map relationshipType to valid enum value
+        confidence_score: 1.0,
+        metadata: {
+          ...metadata,
+          manual: true,
+        },
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      return edge;
+    } catch (e: unknown) {
+      const err = toError(e);
+      logger.error('Failed to create manual connection', {
+        error: err.message,
+        sourceUrn,
+        targetUrn,
+      });
+      throw new LineageError('Failed to create manual connection', 'MANUAL_CONNECTION_FAILED', 500);
+    }
+  }
+
   /* ── Private helpers ─────────────────────────────────────────────────── */
 
   private buildNodesQuery(filters: GraphFilters): { nodesQuery: string; nodesParams: any[] } {

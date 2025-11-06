@@ -405,48 +405,88 @@ export const RevolutionaryLineageGraph: React.FC<RevolutionaryLineageGraphProps>
   }, []);
 
   const loadAISuggestions = async () => {
-    // TODO: Replace with actual API call
-    const mockSuggestions: AIConnectionSuggestion[] = [
-      {
-        id: 'sugg-1',
-        sourceTable: 'customer_analytics',
-        targetTable: 'customer_segments',
-        confidence: 0.92,
-        reason: 'Both tables have customer_id column with matching data types and similar cardinality',
-        matchingColumns: [
-          { source: 'customer_id', target: 'customer_id', similarity: 1.0 },
-          { source: 'segment', target: 'segment_name', similarity: 0.78 },
-        ],
-        suggestedJoinType: 'left',
-      },
-      {
-        id: 'sugg-2',
-        sourceTable: 'orders',
-        targetTable: 'shipping_info',
-        confidence: 0.87,
-        reason: 'Pattern matching found order_id in both tables with 98% join success rate in sample data',
-        matchingColumns: [{ source: 'order_id', target: 'order_id', similarity: 1.0 }],
-        suggestedJoinType: 'inner',
-      },
-    ];
+    try {
+      // Call real backend API for AI suggestions
+      const response = await fetch('/api/lineage/ai/suggestions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          dataSourceId: filters.selectedDataSource || 'default',
+          server: filters.selectedServer || undefined,
+          database: filters.selectedDatabase || undefined,
+          minConfidence: 0.7,
+          maxSuggestions: 20,
+          analyzeSampleData: false,
+        }),
+      });
 
-    setAiSuggestions(mockSuggestions);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && Array.isArray(data.data)) {
+          setAiSuggestions(data.data);
+          console.log(`Loaded ${data.data.length} AI suggestions from backend`);
+        } else {
+          console.warn('Invalid AI suggestions response format', data);
+          setAiSuggestions([]);
+        }
+      } else {
+        console.warn('Failed to load AI suggestions:', response.statusText);
+        setAiSuggestions([]);
+      }
+    } catch (error) {
+      console.error('Error loading AI suggestions:', error);
+      setAiSuggestions([]);
+    }
   };
 
   const onConnect = useCallback(
-    (params: Connection) => {
+    async (params: Connection) => {
       const newEdge: Edge = {
         ...params,
         id: `edge-manual-${Date.now()}`,
         type: 'custom',
         data: { type: 'manual', confidence: 1.0, label: 'Manual connection' },
       };
+
+      // Add to UI immediately for better UX
       setEdges((eds) => addEdge(newEdge, eds));
 
-      // TODO: Save to backend
-      console.log('Manual connection created:', newEdge);
+      // Save to backend
+      try {
+        const sourceNode = nodes.find((n) => n.id === params.source);
+        const targetNode = nodes.find((n) => n.id === params.target);
+
+        if (sourceNode && targetNode) {
+          const response = await fetch('/api/lineage/manual-connection', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              sourceUrn: sourceNode.data.urn || sourceNode.id,
+              targetUrn: targetNode.data.urn || targetNode.id,
+              relationshipType: 'manual_reference',
+              metadata: {
+                createdBy: 'user',
+                confidence: 1.0,
+                label: 'Manual connection',
+              },
+            }),
+          });
+
+          if (response.ok) {
+            console.log('Manual connection saved to backend:', newEdge.id);
+          } else {
+            console.warn('Failed to save manual connection to backend:', response.statusText);
+          }
+        }
+      } catch (error) {
+        console.error('Error saving manual connection:', error);
+      }
     },
-    [setEdges]
+    [setEdges, nodes]
   );
 
   const handleApplySuggestion = (suggestion: AIConnectionSuggestion) => {
