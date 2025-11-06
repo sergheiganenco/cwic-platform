@@ -751,6 +751,10 @@ export class LineageService {
 
   /* ── Manual Connection Creation ──────────────────────────────────────── */
 
+  /**
+   * Create a manual lineage connection - PRODUCTION VERSION
+   * Persists to lineage_edges table with full validation
+   */
   async createManualConnection(params: {
     sourceUrn: string;
     targetUrn: string;
@@ -760,37 +764,111 @@ export class LineageService {
     const { sourceUrn, targetUrn, relationshipType, metadata } = params;
 
     try {
-      // In a production system, you would:
-      // 1. Look up the source and target nodes by URN
-      // 2. Validate the nodes exist
-      // 3. Insert the edge into the lineage_edges table
-      // 4. Return the created edge
-
-      // For now, create a mock edge response
-      const edgeId = `${Date.now()}-manual`;
-
       logger.info('Creating manual lineage connection', {
         sourceUrn,
         targetUrn,
         relationshipType,
       });
 
-      // Mock edge creation - in production, this would be a database insert
-      const edge: LineageEdge = {
-        id: edgeId,
-        from_id: sourceUrn,
-        to_id: targetUrn,
-        relationship_type: 'derives_from', // Map relationshipType to valid enum value
-        confidence_score: 1.0,
-        metadata: {
-          ...metadata,
-          manual: true,
-        },
-        created_at: new Date(),
-        updated_at: new Date(),
+      // 1. Validate and find source and target nodes
+      const sourceNode = await this.findNodeByUrn(sourceUrn);
+      const targetNode = await this.findNodeByUrn(targetUrn);
+
+      if (!sourceNode) {
+        throw new LineageError(
+          `Source node not found: ${sourceUrn}`,
+          'SOURCE_NODE_NOT_FOUND',
+          404
+        );
+      }
+
+      if (!targetNode) {
+        throw new LineageError(
+          `Target node not found: ${targetUrn}`,
+          'TARGET_NODE_NOT_FOUND',
+          404
+        );
+      }
+
+      // 2. Map relationship type to valid enum value
+      const validRelationshipType = this.mapToValidRelationshipType(relationshipType);
+
+      // 3. Generate UUID for the edge
+      const edgeId = createHash('sha256')
+        .update(`${sourceNode.id}-${targetNode.id}-${Date.now()}`)
+        .digest('hex')
+        .substring(0, 36);
+
+      // 4. Insert edge into database with transaction
+      const edge = await withTransaction(this.db, async (client) => {
+        const insertQuery = `
+          INSERT INTO lineage_edges (
+            id,
+            from_id,
+            to_id,
+            relationship_type,
+            transformation_logic,
+            confidence_score,
+            metadata,
+            created_at,
+            updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+          RETURNING *
+        `;
+
+        const values = [
+          edgeId,
+          sourceNode.id,
+          targetNode.id,
+          validRelationshipType,
+          'Manual connection created by user',
+          1.0, // Manual connections have 100% confidence
+          JSON.stringify({
+            ...metadata,
+            manual: true,
+            sourceUrn,
+            targetUrn,
+            originalRelationshipType: relationshipType,
+          }),
+        ];
+
+        const result = await client.query(insertQuery, values);
+
+        if (!result.rows || result.rows.length === 0) {
+          throw new LineageError(
+            'Failed to insert manual connection',
+            'INSERT_FAILED',
+            500
+          );
+        }
+
+        return result.rows[0];
+      });
+
+      // 5. Invalidate lineage cache
+      this.invalidateGraphCache();
+
+      logger.info('Manual lineage connection created successfully', {
+        edgeId,
+        sourceUrn,
+        targetUrn,
+      });
+
+      // 6. Transform database row to LineageEdge type
+      const lineageEdge: LineageEdge = {
+        id: edge.id,
+        from_id: edge.from_id,
+        to_id: edge.to_id,
+        relationship_type: edge.relationship_type,
+        transformation_logic: edge.transformation_logic,
+        confidence_score: edge.confidence_score,
+        metadata: edge.metadata,
+        created_at: edge.created_at,
+        updated_at: edge.updated_at,
+        created_by: edge.created_by,
       };
 
-      return edge;
+      return lineageEdge;
     } catch (e: unknown) {
       const err = toError(e);
       logger.error('Failed to create manual connection', {
@@ -798,8 +876,79 @@ export class LineageService {
         sourceUrn,
         targetUrn,
       });
-      throw new LineageError('Failed to create manual connection', 'MANUAL_CONNECTION_FAILED', 500);
+
+      if (err instanceof LineageError) {
+        throw err;
+      }
+
+      throw new LineageError(
+        'Failed to create manual connection',
+        'MANUAL_CONNECTION_FAILED',
+        500
+      );
     }
+  }
+
+  /**
+   * Find a lineage node by URN (universal resource name)
+   */
+  private async findNodeByUrn(urn: string): Promise<LineageNode | null> {
+    try {
+      // Try to find by ID first (if URN is a UUID)
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+      if (uuidRegex.test(urn)) {
+        const result = await this.db.query(
+          'SELECT * FROM lineage_nodes WHERE id = $1 AND deleted_at IS NULL',
+          [urn]
+        );
+
+        if (result.rows && result.rows.length > 0) {
+          return this.processNodes(result.rows, true)[0] || null;
+        }
+      }
+
+      // Otherwise, search by label or metadata
+      const result = await this.db.query(
+        `SELECT * FROM lineage_nodes
+         WHERE (label = $1 OR metadata->>'urn' = $1)
+         AND deleted_at IS NULL
+         LIMIT 1`,
+        [urn]
+      );
+
+      if (result.rows && result.rows.length > 0) {
+        return this.processNodes(result.rows, true)[0] || null;
+      }
+
+      return null;
+    } catch (error) {
+      logger.error('Failed to find node by URN', { urn, error });
+      return null;
+    }
+  }
+
+  /**
+   * Map user-provided relationship type to valid enum value
+   */
+  private mapToValidRelationshipType(
+    type: string
+  ): 'derives_from' | 'transforms_to' | 'copies_from' | 'aggregates_from' {
+    const lowerType = type.toLowerCase();
+
+    const mappings: Record<string, 'derives_from' | 'transforms_to' | 'copies_from' | 'aggregates_from'> = {
+      manual_reference: 'derives_from',
+      reference: 'derives_from',
+      derives: 'derives_from',
+      transform: 'transforms_to',
+      transformation: 'transforms_to',
+      copy: 'copies_from',
+      copies: 'copies_from',
+      aggregate: 'aggregates_from',
+      aggregation: 'aggregates_from',
+    };
+
+    return mappings[lowerType] || 'derives_from';
   }
 
   /* ── Private helpers ─────────────────────────────────────────────────── */

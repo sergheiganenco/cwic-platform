@@ -496,16 +496,151 @@ export class QualityRuleEngine {
   /**
    * Execute AI anomaly detection rule
    */
+  /**
+   * Execute AI-powered anomaly detection rule - PRODUCTION VERSION
+   * Uses statistical analysis (Z-score, IQR, standard deviation) for anomaly detection
+   */
   private async executeAnomalyRule(rule: QualityRule): Promise<RuleExecutionResult> {
-    // Placeholder - would call AI service for anomaly detection
-    return {
-      id: '',
-      ruleId: rule.id,
-      runAt: new Date(),
-      status: 'passed',
-      anomalyScore: 0.15,
-      executionTimeMs: 0,
-    };
+    if (!rule.assetId || !rule.columnName) {
+      throw new Error('Asset ID and column name required for anomaly detection');
+    }
+
+    // Get asset details
+    const assetResult = await this.db.query(
+      `SELECT table_name, schema_name, datasource_id FROM catalog_assets WHERE id = $1`,
+      [rule.assetId]
+    );
+
+    if (assetResult.rows.length === 0) {
+      throw new Error(`Asset ${rule.assetId} not found`);
+    }
+
+    const asset = assetResult.rows[0];
+    const { table_name, schema_name, datasource_id } = asset;
+
+    // Get connector
+    const connectorConfig = await this.getConnectorConfig(datasource_id);
+    const connector = ConnectorFactory.createConnector(connectorConfig);
+
+    try {
+      await connector.connect();
+
+      // Get historical statistics for the column (mean, std dev, min, max)
+      const statsQuery = `
+        SELECT
+          AVG(CAST(${rule.columnName} AS FLOAT)) as mean,
+          STDDEV(CAST(${rule.columnName} AS FLOAT)) as stddev,
+          MIN(CAST(${rule.columnName} AS FLOAT)) as min_val,
+          MAX(CAST(${rule.columnName} AS FLOAT)) as max_val,
+          PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CAST(${rule.columnName} AS FLOAT)) as q1,
+          PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CAST(${rule.columnName} AS FLOAT)) as q3,
+          COUNT(*) as total_rows
+        FROM ${schema_name}.${table_name}
+        WHERE ${rule.columnName} IS NOT NULL
+      `;
+
+      const statsResult = await connector.query(statsQuery);
+      const stats = statsResult.rows[0];
+
+      if (!stats || stats.total_rows === 0) {
+        return {
+          id: '',
+          ruleId: rule.id,
+          assetId: rule.assetId,
+          dataSourceId: datasource_id,
+          runAt: new Date(),
+          status: 'error',
+          executionTimeMs: 0,
+          errorMessage: 'No data available for anomaly detection',
+        };
+      }
+
+      const mean = parseFloat(stats.mean);
+      const stddev = parseFloat(stats.stddev);
+      const q1 = parseFloat(stats.q1);
+      const q3 = parseFloat(stats.q3);
+      const iqr = q3 - q1;
+
+      // Define anomaly thresholds
+      // Z-score method: values beyond 3 standard deviations
+      const zScoreThreshold = 3;
+      const zScoreLowerBound = mean - (zScoreThreshold * stddev);
+      const zScoreUpperBound = mean + (zScoreThreshold * stddev);
+
+      // IQR method: values beyond 1.5 * IQR from Q1/Q3
+      const iqrMultiplier = 1.5;
+      const iqrLowerBound = q1 - (iqrMultiplier * iqr);
+      const iqrUpperBound = q3 + (iqrMultiplier * iqr);
+
+      // Detect anomalies using both methods
+      const anomalyQuery = `
+        SELECT
+          ${rule.columnName},
+          CAST(${rule.columnName} AS FLOAT) as value,
+          CASE
+            WHEN CAST(${rule.columnName} AS FLOAT) < ${zScoreLowerBound} OR
+                 CAST(${rule.columnName} AS FLOAT) > ${zScoreUpperBound} THEN 'z-score'
+            WHEN CAST(${rule.columnName} AS FLOAT) < ${iqrLowerBound} OR
+                 CAST(${rule.columnName} AS FLOAT) > ${iqrUpperBound} THEN 'iqr'
+            ELSE NULL
+          END as anomaly_type
+        FROM ${schema_name}.${table_name}
+        WHERE ${rule.columnName} IS NOT NULL
+          AND (
+            CAST(${rule.columnName} AS FLOAT) < ${zScoreLowerBound} OR
+            CAST(${rule.columnName} AS FLOAT) > ${zScoreUpperBound} OR
+            CAST(${rule.columnName} AS FLOAT) < ${iqrLowerBound} OR
+            CAST(${rule.columnName} AS FLOAT) > ${iqrUpperBound}
+          )
+        LIMIT 100
+      `;
+
+      const anomalyResult = await connector.query(anomalyQuery);
+      const anomaliesFound = anomalyResult.rows.length;
+      const totalRows = parseInt(stats.total_rows);
+
+      // Calculate anomaly score (percentage of anomalies)
+      const anomalyScore = anomaliesFound / totalRows;
+
+      // Get threshold from rule config (default 5%)
+      const threshold = rule.ruleConfig?.anomalyThreshold || 0.05;
+
+      // Determine status
+      let status: 'passed' | 'failed' | 'warning';
+      if (anomalyScore > threshold) {
+        status = 'failed';
+      } else if (anomalyScore > threshold * 0.5) {
+        status = 'warning';
+      } else {
+        status = 'passed';
+      }
+
+      await connector.disconnect();
+
+      return {
+        id: '',
+        ruleId: rule.id,
+        assetId: rule.assetId,
+        dataSourceId: datasource_id,
+        runAt: new Date(),
+        status,
+        metricValue: anomalyScore * 100, // as percentage
+        thresholdValue: threshold * 100,
+        rowsChecked: totalRows,
+        rowsFailed: anomaliesFound,
+        executionTimeMs: 0,
+        anomalyScore,
+        sampleFailures: anomalyResult.rows.slice(0, 10).map((row: any) => ({
+          value: row.value,
+          anomalyType: row.anomaly_type,
+          zScoreBounds: [zScoreLowerBound, zScoreUpperBound],
+          iqrBounds: [iqrLowerBound, iqrUpperBound],
+        })),
+      };
+    } catch (error: any) {
+      await connector.disconnect();
+      throw error;
+    }
   }
 
   /**
