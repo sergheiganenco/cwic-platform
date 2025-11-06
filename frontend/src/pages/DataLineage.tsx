@@ -1823,14 +1823,19 @@ function DataLineage(): JSX.Element {
                           <div className="text-yellow-700 font-semibold text-xs mb-1">Nodes</div>
                           <div className="text-3xl font-bold text-yellow-900">{highlightedPath.nodes.length}</div>
                         </div>
-                        <code className="text-sm font-mono block mt-2">{selectedNode.metadata.computedExpression}</code>
+                        <div className="text-center">
+                          <div className="text-yellow-700 font-semibold text-xs mb-1">Edges</div>
+                          <div className="text-3xl font-bold text-yellow-900">{highlightedPath.edges.length}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-yellow-700 font-semibold text-xs mb-1">Depth</div>
+                          <div className="text-3xl font-bold text-yellow-900">{highlightedPath.depth}</div>
+                        </div>
                       </div>
-                    )}
+                    </div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+                </Panel>
+              )}
 
           <Card className="border-0 shadow-xl bg-white/90 backdrop-blur-xl h-[calc(100vh-400px)] overflow-hidden hover:shadow-2xl transition-shadow duration-300 relative">
             {/* Animated border gradient */}
