@@ -66,9 +66,10 @@ class QueryValidator {
     if (!upper.trim().startsWith('SELECT')) errors.push('Query must start with SELECT.');
     if (upper.includes(';')) errors.push('Multiple statements are not allowed.');
 
-    // DDL/DML
+    // DDL/DML - use word boundaries to avoid false positives on column names like "updated_at"
     for (const kw of this.FORBIDDEN) {
-      if (upper.includes(kw)) errors.push(`Forbidden keyword detected: ${kw}`);
+      const regex = new RegExp(`\\b${kw}\\b`, 'i');
+      if (regex.test(query)) errors.push(`Forbidden keyword detected: ${kw}`);
     }
 
     // Dangerous patterns
@@ -405,6 +406,11 @@ export class QualityService {
 
     const rule = ruleRes.rows[0] as QualityRule;
 
+    // Check if this is a template rule (contains ${...} placeholders)
+    if (rule.expression && /\$\{[^}]+\}/.test(rule.expression)) {
+      throw new Error('Cannot execute template rule directly. This rule contains placeholders that must be resolved first.');
+    }
+
     let status: QualityResult['status'] = 'skipped';
     let metrics: Record<string, any> = {};
     let error: string | null = null;
@@ -470,6 +476,10 @@ export class QualityService {
           ruleId: input.ruleId,
           dataSourceId: input.dataSourceId ?? null,
           error,
+          fullError: e,
+          errorStack: e?.stack,
+          errorCode: e?.code,
+          errorDetail: e?.detail,
         });
       } finally {
         if (client) {
