@@ -68,6 +68,7 @@ import { RevolutionaryRulesView } from '@components/quality/revolutionary';
 import { RuleBuilder } from '@components/quality/RuleBuilder';
 import { GlobalRulesSystem } from '@components/quality/GlobalRulesSystem';
 import { SmartRulesStudio } from '@components/quality/SmartRulesStudio';
+import ModernRulesHubFixed from '@components/quality/revolutionary/ModernRulesHubFixed';
 import ModernRulesHub from '@components/quality/revolutionary/ModernRulesHubFixed';
 import type {
   AssetProfile,
@@ -1315,6 +1316,9 @@ LIMIT 1`;
     const USE_GLOBAL_RULES = false; // Disabled: requires backend implementation
 
     if (USE_MODERN_HUB) {
+      // PRODUCTION-READY ModernRulesHubFixed with real data integration
+      // Features: Real API calls, AI learning, CRUD operations, execution monitoring
+      return <ModernRulesHubFixed />;
       // The ModernRulesHub now uses global data source and database selections
       // Pass the selected values from the global filters and available data sources
       return (
