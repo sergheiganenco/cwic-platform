@@ -68,7 +68,7 @@ import { RevolutionaryRulesView } from '@components/quality/revolutionary';
 import { RuleBuilder } from '@components/quality/RuleBuilder';
 import { GlobalRulesSystem } from '@components/quality/GlobalRulesSystem';
 import { SmartRulesStudio } from '@components/quality/SmartRulesStudio';
-import ModernRulesHub from '@components/quality/revolutionary/ModernRulesHub';
+import ModernRulesHubFixed from '@components/quality/revolutionary/ModernRulesHubFixed';
 import type {
   AssetProfile,
   QualityRule,
@@ -1315,9 +1315,9 @@ LIMIT 1`;
     const USE_GLOBAL_RULES = false; // Disabled: requires backend implementation
 
     if (USE_MODERN_HUB) {
-      // The ModernRulesHub is a self-contained component with its own state management
-      // It provides a revolutionary and simplified UI for managing quality rules
-      return <ModernRulesHub />;
+      // PRODUCTION-READY ModernRulesHubFixed with real data integration
+      // Features: Real API calls, AI learning, CRUD operations, execution monitoring
+      return <ModernRulesHubFixed />;
     }
 
     if (USE_GLOBAL_RULES) {
