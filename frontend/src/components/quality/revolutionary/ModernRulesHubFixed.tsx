@@ -87,7 +87,7 @@ const ModernRulesHubFixed: React.FC = () => {
   const [selectedTemplate, setSelectedTemplate] = useState<RuleTemplate | null>(null);
 
   // Data Source Integration
-  const { dataSources, loading: dsLoading } = useDataSources();
+  const { items: dataSources, loading: dsLoading } = useDataSources();
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<string>('');
 
   // Categories with modern icons and colors
