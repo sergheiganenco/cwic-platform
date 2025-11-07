@@ -111,13 +111,19 @@ class Database {
       });
       
       return result;
-    } catch (error) {
+    } catch (error: any) {
       const duration = Date.now() - start;
       logger.error('Database query failed', {
         queryId,
         query: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
         duration: `${duration}ms`,
         error: error instanceof Error ? error.message : 'Unknown error',
+        errorStack: error?.stack,
+        errorCode: error?.code,
+        errorDetail: error?.detail,
+        errorHint: error?.hint,
+        errorPosition: error?.position,
+        fullError: error,
         paramCount: params?.length || 0,
       });
       throw error;
