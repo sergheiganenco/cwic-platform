@@ -43,6 +43,7 @@ services:
       AI_SERVICE_URL: http://ai-service:3003
       AUTH_SERVICE_URL: http://auth-service:3001
       PIPELINE_SERVICE_URL: http://pipeline-service:3004
+      INTEGRATION_SERVICE_URL: http://integration-service:3005
       QUALITY_ENGINE_URL: http://quality-engine:3010
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
       # DEV_BEARER removed for security
@@ -245,7 +246,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # ---------- INTEGRATION SERVICE ----------
+  # ---------- INTEGRATION SERVICE (Agentic AI) ----------
   integration-service:
     build:
       context: ./backend/integration-service
@@ -254,13 +255,39 @@ services:
     environment:
       NODE_ENV: development
       HOST: 0.0.0.0
-      PORT: 3006
+      PORT: 3005
       CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+      # Agentic AI Configuration
+      USE_MOCKS: "true"
+      ENABLE_AI: "false"
+      AUTO_REMEDIATE: "true"
+      VERIFY_WEBHOOKS: "false"
+      # Service URLs
+      PIPELINE_SERVICE_URL: http://pipeline-service:3004
+      DATA_SERVICE_URL: http://data-service:3002
+      AI_SERVICE_URL: http://ai-service:3003
+      # External integrations (configure in .env for production)
+      # JIRA_URL: https://your-company.atlassian.net
+      # JIRA_USERNAME: your-email@company.com
+      # JIRA_API_TOKEN: your-token
+      # JIRA_PROJECT: DATA
+      # SERVICENOW_INSTANCE: your-instance.service-now.com
+      # SERVICENOW_USERNAME: admin
+      # SERVICENOW_PASSWORD: your-password
+      # AZURE_DEVOPS_ORGANIZATION: your-org
+      # AZURE_DEVOPS_PROJECT: your-project
+      # AZURE_DEVOPS_TOKEN: your-pat
+      # GITHUB_WEBHOOK_SECRET: your-secret
+      # OPENAI_API_KEY: sk-your-key
     ports:
-      - "3006:3006"
+      - "3005:3005"
     volumes:
       - ./backend/integration-service:/app
       - /app/node_modules
+    depends_on:
+      - pipeline-service
+      - data-service
+      - ai-service
     networks:
       - cwic-network
     restart: unless-stopped
@@ -268,7 +295,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "node -e \"require('http').get('http://127.0.0.1:3006/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+          "node -e \"require('http').get('http://127.0.0.1:3005/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
         ]
       interval: 30s
       timeout: 10s
