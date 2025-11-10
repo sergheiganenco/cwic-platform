@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Query Patterns</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        .test { margin: 10px 0; padding: 10px; border: 1px solid #ddd; }
+        .pass { background: #d4edda; }
+        .fail { background: #f8d7da; }
+        .query { font-weight: bold; }
+        .result { margin-top: 5px; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Query Pattern Tests</h1>
+    <div id="results"></div>
+
+    <script>
+        function understandQuery(query, lastTable = null) {
+            const queryLower = query.toLowerCase();
+
+            // Column-related queries
+            if (/(?:show|list|get|display|what\s+are|tell\s+me|give\s+me).{0,15}columns?/i.test(query)) {
+                const tableMatch = query.match(/(?:for|of|in|from)\s+(?:the\s+)?(?:table\s+)?(\w+)/i);
+                const tableName = tableMatch ? tableMatch[1] : lastTable;
+                return {
+                    intent: 'show_columns',
+                    entities: { table: tableName },
+                    confidence: tableName ? 95 : 60
+                };
+            }
+
+            // Table search
+            if (/(?:find|show|search|get|where\s+is|tell\s+me\s+about|give\s+me).{0,15}(?:table|database)/i.test(query)) {
+                let match = query.match(/(?:table|database)\s+(\w+)/i);
+                if (!match) {
+                    match = query.match(/(?:show|find|get|tell)\s+(?:me\s+)?(?:the\s+)?(\w+)\s+table/i);
+                }
+                return {
+                    intent: 'find_table',
+                    entities: { searchTerm: match ? match[1] : null },
+                    confidence: 90
+                };
+            }
+
+            return { intent: 'general', entities: {}, confidence: 50 };
+        }
+
+        const tests = [
+            { query: "show me the columns", lastTable: "Notifications", expected: "show_columns with Notifications" },
+            { query: "show columns for Notifications", lastTable: null, expected: "show_columns with Notifications" },
+            { query: "show me the customer table", lastTable: null, expected: "find_table with customer" },
+            { query: "find table wish", lastTable: null, expected: "find_table with wish" },
+            { query: "tell me about the orders table", lastTable: null, expected: "find_table with orders" },
+            { query: "what are the columns", lastTable: "Users", expected: "show_columns with Users" },
+            { query: "list columns for Products", lastTable: null, expected: "show_columns with Products" }
+        ];
+
+        const resultsDiv = document.getElementById('results');
+
+        tests.forEach(test => {
+            const result = understandQuery(test.query, test.lastTable);
+            const actual = `${result.intent} with ${result.entities.table || result.entities.searchTerm || 'none'}`;
+            const pass = actual === test.expected;
+
+            const div = document.createElement('div');
+            div.className = `test ${pass ? 'pass' : 'fail'}`;
+            div.innerHTML = `
+                <div class="query">Query: "${test.query}"${test.lastTable ? ` (context: ${test.lastTable})` : ''}</div>
+                <div class="result">Expected: ${test.expected}</div>
+                <div class="result">Got: ${actual} (${result.confidence}% confidence)</div>
+                <div class="result">${pass ? '✅ PASS' : '❌ FAIL'}</div>
+            `;
+            resultsDiv.appendChild(div);
+        });
+
+        const passCount = tests.filter((test, i) => {
+            const result = understandQuery(test.query, test.lastTable);
+            const actual = `${result.intent} with ${result.entities.table || result.entities.searchTerm || 'none'}`;
+            return actual === test.expected;
+        }).length;
+
+        const summary = document.createElement('div');
+        summary.style.marginTop = '20px';
+        summary.style.padding = '10px';
+        summary.style.background = '#e7f3ff';
+        summary.innerHTML = `<strong>Results: ${passCount}/${tests.length} tests passed</strong>`;
+        resultsDiv.appendChild(summary);
+    </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "dataSourceId": "793e4fe5-db62-4aa4-8b48-c220960d85ba",
+  "databaseName": "adventureworks",
+  "schemaName": "public",
+  "tableName": "audit_log"
+}
