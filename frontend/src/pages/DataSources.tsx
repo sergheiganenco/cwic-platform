@@ -382,17 +382,26 @@ export default function DataSourcesPage() {
         return
       }
 
-      // Load databases with metadata from the new API
+      // Load databases with metadata from the data source API
       setLoadingDatabases(prev => ({ ...prev, [id]: true }))
       try {
-        const params = new URLSearchParams({ dataSourceId: id })
-        const response = await fetch(`/api/catalog/databases?${params}`)
+        const response = await fetch(`/api/data-sources/${id}/databases`)
         const result = await response.json()
 
         if (result.success && result.data && result.data.length > 0) {
-          const sourceData = result.data[0]
-          setBrowsedDatabases(prev => ({ ...prev, [id]: sourceData.databases }))
-          setSystemDatabasesBySource(prev => ({ ...prev, [id]: sourceData.systemDatabases || [] }))
+          // Convert the simple array format from the API to the expected format
+          const databases = result.data.map((db: any) => ({
+            name: db.name,
+            tableCount: db.tableCount || 0,
+            size: db.size || '0 MB',
+            isSystem: db.isSystem || false
+          }))
+
+          // Separate system databases
+          const systemDbs = databases.filter((db: any) => db.isSystem).map((db: any) => db.name)
+
+          setBrowsedDatabases(prev => ({ ...prev, [id]: databases }))
+          setSystemDatabasesBySource(prev => ({ ...prev, [id]: systemDbs }))
         } else {
           setBrowsedDatabases(prev => ({ ...prev, [id]: [] }))
           setSystemDatabasesBySource(prev => ({ ...prev, [id]: [] }))

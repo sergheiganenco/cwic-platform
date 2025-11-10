@@ -403,7 +403,38 @@ export class QualityAutopilotService {
     threshold: number,
     userId: string
   ): Promise<any> {
-    const expression = `SELECT COUNT(*) FILTER (WHERE "${column.name}" IS NULL) * 100.0 / NULLIF(COUNT(*), 0) AS null_rate FROM "${table.schema}"."${table.name}"`;
+    // Updated to return actual rows with NULL values (violations), plus pass/fail indicator
+    const expression = `
+WITH null_analysis AS (
+  SELECT
+    COUNT(*) FILTER (WHERE "${column.name}" IS NULL) AS null_count,
+    COUNT(*) AS total_count,
+    COUNT(*) FILTER (WHERE "${column.name}" IS NULL) * 100.0 / NULLIF(COUNT(*), 0) AS null_rate
+  FROM "${table.schema}"."${table.name}"
+),
+violation_rows AS (
+  SELECT
+    '${table.schema}.${table.name}' AS table_name,
+    '${column.name}' AS column_name,
+    COALESCE((SELECT id::text FROM "${table.schema}"."${table.name}" WHERE "${column.name}" IS NULL LIMIT 1), 'N/A') AS row_id,
+    'NULL' AS value,
+    'NULL value detected' AS issue_type
+  FROM "${table.schema}"."${table.name}"
+  WHERE "${column.name}" IS NULL
+  LIMIT 100
+)
+SELECT
+  (SELECT null_rate < ${threshold * 100} FROM null_analysis) AS passed,
+  (SELECT null_count FROM null_analysis) AS rows_failed,
+  (SELECT total_count FROM null_analysis) AS total_rows,
+  (SELECT null_rate FROM null_analysis) AS null_rate_pct,
+  vr.table_name,
+  vr.column_name,
+  vr.row_id,
+  vr.value,
+  vr.issue_type
+FROM violation_rows vr
+`.trim();
 
     const result = await this.db.query(
       `INSERT INTO quality_rules (

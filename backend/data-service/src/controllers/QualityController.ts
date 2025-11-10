@@ -30,6 +30,8 @@ const ListRulesSchema = z.object({
   q: z.string().max(100).optional(),
   severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
   enabled: z.coerce.boolean().optional(),
+  dataSourceId: z.string().uuid().optional(),
+  databases: z.string().optional(), // Comma-separated database names
   limit: z.coerce.number().min(1).max(100).default(50),
   offset: z.coerce.number().min(0).default(0),
 });

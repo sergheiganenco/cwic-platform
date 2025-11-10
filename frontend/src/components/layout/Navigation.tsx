@@ -27,14 +27,14 @@ const sections: Section[] = [
   {
     id: "data", label: "DATA", items: [
       { to: "/sources", label: "Data Sources", icon: Database },
-      { to: "/catalog", label: "Data Catalog", icon: BookOpen },
-      { to: "/lineage", label: "Lineage", icon: GitMerge }
+      { to: "/data-catalog", label: "Data Catalog", icon: BookOpen },
+      { to: "/data-lineage", label: "Lineage", icon: GitMerge }
     ]
   },
   {
     id: "operations", label: "OPERATIONS", items: [
       { to: "/pipelines", label: "Pipelines", icon: GitBranch },
-      { to: "/quality", label: "Data Quality", icon: Shield },
+      { to: "/data-quality", label: "Data Quality", icon: Shield },
       { to: "/monitoring", label: "Monitoring", icon: Activity }
     ]
   },

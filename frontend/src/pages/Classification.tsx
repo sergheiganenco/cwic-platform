@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   AlertTriangle,
   CheckCircle,
@@ -20,7 +20,22 @@ import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { useClassification, useReviewSelection, useReviewQueueFilters } from '@/hooks/useClassification'
 
+// Import the ultra revolutionary classification component
+import { UltraRevolutionaryClassification } from './UltraRevolutionaryClassification'
+// import { RevolutionaryClassification } from './RevolutionaryClassification'
+
+// Export the ultra revolutionary version as the default
 const Classification: React.FC = () => {
+  return <UltraRevolutionaryClassification />
+}
+
+// Alternative: use the previous revolutionary version
+// const Classification: React.FC = () => {
+//   return <RevolutionaryClassification />
+// }
+
+// Keep the original implementation below for reference
+const OriginalClassification: React.FC = () => {
   const {
     policies,
     reviewQueue,

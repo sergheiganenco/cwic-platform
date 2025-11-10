@@ -144,7 +144,7 @@ function normalizeAccessResponse(raw: any): AccessRequestResponse {
 }
 
 export const useDataAssets = (options: UseDataAssetsOptions = {}): UseDataAssetsReturn => {
-  const api = useApi();
+  const api = useApi({ base: 'http://localhost:8000/api' });
   const {
     autoFetch = true,
     // include typical defaults + schema support (type allows it)

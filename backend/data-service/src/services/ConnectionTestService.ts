@@ -169,11 +169,28 @@ export class ConnectionTestService {
     } catch (error: unknown) {
       const responseTime = Date.now() - startTime
       logger.error(`Connection test failed for ${dataSource.name}:`, error)
+
+      // Provide Azure SQL-specific troubleshooting guidance
+      let errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+
+      if (dataSource.type === 'mssql') {
+        const config = dataSource.connectionConfig as any
+        const isAzureSQL = config.host?.includes('database.windows.net') || config.host?.includes('.database.azure.com')
+
+        if (isAzureSQL && errorMessage.includes('Login failed')) {
+          errorMessage += '\n\n🔍 Azure SQL Troubleshooting:\n' +
+            '1. Verify the user exists in the specific database (not just server-level)\n' +
+            '2. Check Azure SQL firewall rules include your current IP\n' +
+            '3. Ensure SQL Authentication is enabled (not just Azure AD)\n' +
+            '4. Verify the user has proper permissions on the database\n' +
+            '5. For Azure SQL, you must connect to a specific database (not master)'
+        }
+      }
+
       return {
         success: false,
         responseTime,
-        error:
-          error instanceof Error ? error.message : 'Unknown error occurred',
+        error: errorMessage,
         testedAt: new Date(),
       }
     }
@@ -282,30 +299,67 @@ export class ConnectionTestService {
       throw new Error('Missing required connection parameters (host, username, password)')
     }
 
-    // For server-level connections, use the first database from databases array or 'master' as default
-    let databaseName: string | undefined = toStr(c.database)
-    if (!databaseName && c.scope === 'server') {
-      if (Array.isArray(c.databases) && c.databases.length > 0) {
-        databaseName = c.databases[0]
-      } else {
-        databaseName = 'master' // Default SQL Server system database
-      }
-    }
+    // Detect Azure SQL by hostname
+    const isAzureSQL = c.host?.includes('database.windows.net') || c.host?.includes('.database.azure.com');
 
-    const config = {
+    // Determine database name based on scope and config
+    let databaseName: string | undefined;
+
+    // For server-level connections to Azure SQL, NEVER specify a database
+    // This allows the connection to work at the server level and access all databases
+    if (c.scope === 'server' && isAzureSQL) {
+      // Explicitly undefined for Azure SQL server-level connections
+      databaseName = undefined;
+      logger.info('Azure SQL server-level connection - not specifying database');
+    } else if (c.scope === 'database') {
+      // For database-level connections, use the specified database
+      databaseName = toStr(c.database);
+    } else if (c.scope === 'server' && !isAzureSQL) {
+      // For on-premises server-level connections, also don't specify database
+      // This allows listing all databases on the server
+      databaseName = undefined;
+      logger.info('On-premises SQL Server server-level connection - not specifying database');
+    }
+    // Otherwise leave undefined (no database specified)
+
+    // Use frontend-provided options if they exist, otherwise use ssl flag
+    const options = c.options && typeof c.options === 'object'
+      ? {
+          encrypt: c.options.encrypt ?? (c.ssl !== false),
+          trustServerCertificate: c.options.trustServerCertificate ?? (c.ssl === false || c.ssl === undefined),
+          enableArithAbort: true,
+        }
+      : {
+          encrypt: c.ssl !== false,
+          trustServerCertificate: c.ssl === false || c.ssl === undefined,
+          enableArithAbort: true,
+        };
+
+    const config: any = {
       server: c.host,
       port: Number(c.port || 1433),
       user: c.username,
       password: c.password,
-      database: databaseName,
-      options: {
-        encrypt: c.ssl !== false,
-        trustServerCertificate: c.ssl === false || c.ssl === undefined,
-        enableArithAbort: true,
-      },
+      options,
       connectionTimeout: c.timeout || 30_000,
       requestTimeout: c.timeout || 30_000,
     }
+
+    // Only add database if specified - for server-level connections, omit it
+    if (databaseName) {
+      config.database = databaseName
+    }
+
+    logger.info(`Testing MSSQL connection`, {
+      server: c.host,
+      database: databaseName,
+      username: c.username,
+      isAzureSQL,
+      encrypt: config.options.encrypt,
+      trustServerCertificate: config.options.trustServerCertificate,
+      port: config.port,
+      scope: c.scope
+    });
 
     const pool = await mssql.connect(config)
     try {
@@ -726,9 +780,15 @@ export class ConnectionTestService {
     const isAzureSQL = cfg.host?.includes('database.windows.net') || cfg.host?.includes('.database.azure.com');
 
     // For Azure SQL Database, return the configured database since server-level queries aren't allowed
-    if (isAzureSQL && cfg.database) {
-      logger.info(`Azure SQL Database detected, returning configured database: ${cfg.database}`);
-      return [{ name: cfg.database }];
+    if (isAzureSQL) {
+      if (cfg.database) {
+        logger.info(`Azure SQL Database detected, returning configured database: ${cfg.database}`);
+        return [{ name: cfg.database }];
+      } else {
+        logger.warn('Azure SQL Database detected but no database configured. Cannot list databases without a specific database connection.');
+        // Return empty array - user must configure a specific database
+        return [];
+      }
     }
 
     // For on-premises SQL Server or Azure SQL Managed Instance, try server-level query

@@ -87,7 +87,7 @@ const ModernRulesHubFixed: React.FC = () => {
   const [selectedTemplate, setSelectedTemplate] = useState<RuleTemplate | null>(null);
 
   // Data Source Integration
-  const { items: dataSources, loading: dsLoading } = useDataSources();
+  const { dataSources, loading: dsLoading } = useDataSources();
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<string>('');
 
   // Categories with modern icons and colors
@@ -111,8 +111,7 @@ const ModernRulesHubFixed: React.FC = () => {
     try {
       setLoading(true);
       const fetchedRules = await qualityAPI.getRules({
-        dataSourceId: selectedDataSourceId || undefined,
-        enabled: true  // Only fetch enabled rules (exclude disabled autopilot rules)
+        dataSourceId: selectedDataSourceId || undefined
       });
 
       // Enrich with execution statistics

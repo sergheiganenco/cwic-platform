@@ -31,6 +31,7 @@ export const useFieldDiscovery = () => {
     setError(null);
     try {
       const result = await fieldDiscoveryAPI.discoverFields(request);
+      console.log('Discovery result:', result);
       setFields(result.fields);
       return result;
     } catch (err: any) {
@@ -242,7 +243,7 @@ export const useFieldSelection = () => {
  */
 export const useFieldDiscoveryFilters = () => {
   const [filters, setFilters] = useState<GetFieldsFilter>({
-    limit: 50,
+    limit: 100,  // Optimized limit for better performance
     offset: 0,
   });
 
@@ -251,11 +252,11 @@ export const useFieldDiscoveryFilters = () => {
   }, []);
 
   const resetFilters = useCallback(() => {
-    setFilters({ limit: 50, offset: 0 });
+    setFilters({ limit: 100, offset: 0 });
   }, []);
 
   const setPage = useCallback((page: number) => {
-    setFilters((prev) => ({ ...prev, offset: page * (prev.limit || 50) }));
+    setFilters((prev) => ({ ...prev, offset: page * (prev.limit || 100) }));
   }, []);
 
   return {

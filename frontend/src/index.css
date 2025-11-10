@@ -5,6 +5,9 @@
 /* Tailwind imports - processed by globals.css */
 @import './styles/globals.css';
 
+/* Revolutionary animations for Field Discovery */
+@import './styles/animations.css';
+
 :root {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   line-height: 1.6;

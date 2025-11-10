@@ -209,10 +209,13 @@ export class QualityService {
     q?: string;
     severity?: string;
     enabled?: boolean;
+    dataSourceId?: string;
+    databases?: string;
     limit?: number;
     offset?: number;
   } = {}): Promise<{ rules: QualityRule[]; total: number }> {
     const { q = '', severity, enabled, limit = 50, offset = 0 } = filters;
+    // Note: dataSourceId and databases filters are not supported by current schema
 
     const conds: string[] = [];
     const params: any[] = [];

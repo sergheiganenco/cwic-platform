@@ -14,6 +14,7 @@ import {
   TrendingUp,
   FileText,
   Loader2,
+  Lightbulb,
 } from 'lucide-react';
 import { Button } from '@components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@components/ui/Card';
@@ -426,6 +427,23 @@ const CompactProfiling: React.FC<CompactProfilingProps> = ({
                   <option value="no">No</option>
                 </select>
               </div>
+
+              {/* Suggest Rules Button - NEW! */}
+              <Button
+                onClick={() => {
+                  // Navigate to Rules tab and trigger suggestions
+                  const event = new CustomEvent('openRuleSuggestions', {
+                    detail: { dataSourceId, profiledAssets: stats.profiledAssets }
+                  });
+                  window.dispatchEvent(event);
+                }}
+                disabled={stats.profiledAssets === 0}
+                className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700"
+                size="sm"
+              >
+                <Lightbulb className="w-4 h-4 mr-2" />
+                Suggest Rules ({stats.profiledAssets})
+              </Button>
 
               {/* Refresh Button */}
               <Button

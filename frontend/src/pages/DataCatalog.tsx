@@ -62,6 +62,9 @@ const SYSTEM_SCHEMAS = [
 ];
 const SYSTEM_TABLE_PREFIXES = ['sys', 'MS', '__RefactorLog', 'trace_xe', 'pg_', 'sql_'];
 
+// API base URL for all fetch calls
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const normalizeString = (value?: string | number | null) =>
   value === undefined || value === null ? '' : String(value).trim().toLowerCase();
 
@@ -155,7 +158,7 @@ const DataCatalog: React.FC = () => {
         if (filters.dataSourceId) {
           params.append('dataSourceId', filters.dataSourceId);
         }
-        const response = await fetch(`/api/catalog/databases?${params}`);
+        const response = await fetch(`${API_BASE}/api/catalog/databases?${params}`);
         const data = await response.json();
         if (data.success) {
           setDatabasesByDataSource(data.data);
@@ -183,7 +186,7 @@ const DataCatalog: React.FC = () => {
         const searchTerm = filters.search?.trim();
         if (searchTerm) params.append('search', searchTerm);
 
-        const response = await fetch(`/api/catalog/summary?${params}`);
+        const response = await fetch(`${API_BASE}/api/catalog/summary?${params}`);
         const data = await response.json();
         if (data.success) {
           console.log('📊 Catalog summary updated:', data.data);
@@ -208,7 +211,7 @@ const DataCatalog: React.FC = () => {
       } else if (assets.length > 0) {
         // If not found in loaded assets, fetch directly from API
         console.log('🔗 Deep link: Fetching asset from API:', assetId);
-        fetch(`/api/catalog/assets/${assetId}`)
+        fetch(`${API_BASE}/api/catalog/assets/${assetId}`)
           .then(res => res.json())
           .then(data => {
             if (data.success && data.data) {
@@ -482,7 +485,7 @@ const DataCatalog: React.FC = () => {
   const handlePreview = async (assetId: string) => {
     setPreviewModal({ open: true, data: null, loading: true });
     try {
-      const response = await fetch(`/api/catalog/assets/${assetId}/preview?limit=20`);
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/preview?limit=20`);
       const result = await response.json();
 
       // Check if there's an error in the response
@@ -502,7 +505,7 @@ const DataCatalog: React.FC = () => {
   const handleQuery = async (assetId: string) => {
     setQueryModal({ open: true, query: '', loading: true });
     try {
-      const response = await fetch(`/api/catalog/assets/${assetId}/query`);
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/query`);
       const result = await response.json();
       setQueryModal({ open: true, query: result.data?.query || result.query || '', loading: false });
     } catch (error) {
@@ -526,7 +529,7 @@ const DataCatalog: React.FC = () => {
 
   const handleBookmark = async (assetId: string) => {
     try {
-      const response = await fetch(`/api/catalog/assets/${assetId}/bookmark`, { method: 'POST' });
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/bookmark`, { method: 'POST' });
       const result = await response.json();
 
       if (!response.ok || result.error) {
@@ -556,7 +559,7 @@ const DataCatalog: React.FC = () => {
 
   const handleRate = async (assetId: string, rating: number) => {
     try {
-      const response = await fetch(`/api/catalog/assets/${assetId}/rate`, {
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/rate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating })
@@ -650,7 +653,7 @@ const DataCatalog: React.FC = () => {
     try {
       showNotification('Starting profile scan...', 'success');
 
-      const response = await fetch(`/api/catalog/assets/${assetId}/profile`, {
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/profile`, {
         method: 'POST'
       });
 
@@ -677,7 +680,7 @@ const DataCatalog: React.FC = () => {
   const handleSaveDescription = async (assetId: string, description: string) => {
     setDescriptionModal(prev => ({ ...prev, loading: true }));
     try {
-      const response = await fetch(`/api/catalog/assets/${assetId}/description`, {
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/description`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ description })
@@ -706,7 +709,7 @@ const DataCatalog: React.FC = () => {
     setDescriptionModal(prev => ({ ...prev, currentDesc: '', loading: true }));
 
     try {
-      const response = await fetch(`/api/catalog/assets/${assetId}/description`, {
+      const response = await fetch(`${API_BASE}/api/catalog/assets/${assetId}/description`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ generate: true })
@@ -964,7 +967,7 @@ const DataCatalog: React.FC = () => {
                                         ? [...(filters.databases || []), database.name]
                                         : (filters.databases || []).filter(d => d !== database.name);
                                       setFilters(prev => ({ ...prev, databases: newDatabases }));
-                                      updateFilters({ page: 1, databases: newDatabases.length > 0 ? newDatabases.join(',') : undefined });
+                                      updateFilters({ page: 1, databases: newDatabases });
                                     }}
                                     className="h-4 w-4 rounded border-gray-300 text-blue-600"
                                   />
@@ -996,7 +999,7 @@ const DataCatalog: React.FC = () => {
                                         ? [...(filters.databases || []), database.name]
                                         : (filters.databases || []).filter(d => d !== database.name);
                                       setFilters(prev => ({ ...prev, databases: newDatabases }));
-                                      updateFilters({ page: 1, databases: newDatabases.length > 0 ? newDatabases.join(',') : undefined });
+                                      updateFilters({ page: 1, databases: newDatabases });
                                     }}
                                     className="h-4 w-4 rounded border-gray-300 text-blue-600"
                                   />
@@ -1536,7 +1539,7 @@ const AssetDetailsPanel: React.FC<{
   useEffect(() => {
     if (activeTab === 'columns' && columns.length === 0 && !loadingColumns) {
       setLoadingColumns(true);
-      fetch(`/api/catalog/assets/${asset.id}/columns`)
+      fetch(`${API_BASE}/api/catalog/assets/${asset.id}/columns`)
         .then(res => res.json())
         .then(data => {
           if (data.success) {
@@ -1552,7 +1555,7 @@ const AssetDetailsPanel: React.FC<{
   useEffect(() => {
     if (activeTab === 'lineage' && !lineage && !loadingLineage) {
       setLoadingLineage(true);
-      fetch(`/api/catalog/assets/${asset.id}/lineage`)
+      fetch(`${API_BASE}/api/catalog/assets/${asset.id}/lineage`)
         .then(res => res.json())
         .then(data => {
           if (data.success) {
@@ -1840,7 +1843,7 @@ const AssetDetailsPanel: React.FC<{
                               // Fetch full asset details before navigating
                               try {
                                 console.log('[Upstream Click] Fetching asset:', item.id);
-                                const response = await fetch(`/api/catalog/assets/${item.id}`);
+                                const response = await fetch(`${API_BASE}/api/catalog/assets/${item.id}`);
                                 const data = await response.json();
                                 console.log('[Upstream Click] Response:', data);
 
@@ -1913,7 +1916,7 @@ const AssetDetailsPanel: React.FC<{
                               // Fetch full asset details before navigating
                               try {
                                 console.log('[Downstream Click] Fetching asset:', item.id);
-                                const response = await fetch(`/api/catalog/assets/${item.id}`);
+                                const response = await fetch(`${API_BASE}/api/catalog/assets/${item.id}`);
                                 const data = await response.json();
                                 console.log('[Downstream Click] Response:', data);
 

@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Clock,
   Database,
+  Download,
   FileCode,
   FileSearch,
   Filter,
@@ -70,6 +71,8 @@ import { GlobalRulesSystem } from '@components/quality/GlobalRulesSystem';
 import { SmartRulesStudio } from '@components/quality/SmartRulesStudio';
 import ModernRulesHubFixed from '@components/quality/revolutionary/ModernRulesHubFixed';
 import ModernRulesHub from '@components/quality/revolutionary/ModernRulesHubFixed';
+import { DataQualityProvider, useDataQualityFilters } from '@/contexts/DataQualityContext';
+import { DataQualityExport } from '@components/quality/DataQualityExport';
 import type {
   AssetProfile,
   QualityRule,
@@ -105,10 +108,13 @@ interface ProfilingProgress {
 // MAIN COMPONENT
 // ============================================================================
 
-export const DataQuality: React.FC = () => {
+const DataQualityInner: React.FC = () => {
+  // Persistent filters from context
+  const { filters, setFilters } = useDataQualityFilters();
+
   // State Management - Updated to match Data Catalog
-  const [selectedDataSourceId, setSelectedDataSourceId] = useState<string>('');
-  const [selectedDatabases, setSelectedDatabases] = useState<string[]>([]); // Changed to array for multi-select
+  const [selectedDataSourceId, setSelectedDataSourceId] = useState<string>(filters.selectedServer || '');
+  const [selectedDatabases, setSelectedDatabases] = useState<string[]>(filters.selectedDatabases || []); // Changed to array for multi-select
   const [showDatabasePicker, setShowDatabasePicker] = useState(false);
   const [databasesByDataSource, setDatabasesByDataSource] = useState<Array<{ dataSourceId: string; dataSourceName: string; databases: Array<{ name: string; isSystem: boolean; isSynced: boolean }> }>>([]);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -148,6 +154,7 @@ export const DataQuality: React.FC = () => {
   const [autopilotEnabled, setAutopilotEnabled] = useState<boolean>(false);
   const [autopilotStatus, setAutopilotStatus] = useState<any>(null);
   const [loadingAutopilot, setLoadingAutopilot] = useState<boolean>(false);
+  const [showExportModal, setShowExportModal] = useState<boolean>(false);
 
   // Handle URL parameters for navigation from Data Catalog
   useEffect(() => {
@@ -174,6 +181,18 @@ export const DataQuality: React.FC = () => {
       setSelectedDatabases([database]);
     }
   }, []);
+
+  // Sync local state to context (persist filters across tabs)
+  // Only update when the actual values change, not on every render
+  useEffect(() => {
+    if (selectedDataSourceId !== filters.selectedServer ||
+        JSON.stringify(selectedDatabases) !== JSON.stringify(filters.selectedDatabases)) {
+      setFilters({
+        selectedServer: selectedDataSourceId,
+        selectedDatabases: selectedDatabases
+      });
+    }
+  }, [selectedDataSourceId, selectedDatabases]); // Removed setFilters from deps to prevent infinite loop
 
   // Hooks
   const { items: dataSources, listDatabases } = useDataSources();
@@ -2394,6 +2413,14 @@ LIMIT 1`;
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={() => setShowExportModal(true)}
+              className="bg-gradient-to-r from-indigo-50 to-purple-50 border-indigo-200 hover:border-indigo-300 text-indigo-700 font-semibold"
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Export Report
+            </Button>
             <Button variant="outline" onClick={refreshSummary}>
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
@@ -2629,7 +2656,21 @@ LIMIT 1`;
           availableColumns={availableColumns}
         />
       )}
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <DataQualityExport onClose={() => setShowExportModal(false)} />
+      )}
     </div>
+  );
+};
+
+// Wrap with DataQualityProvider to enable persistent filters across tabs
+export const DataQuality: React.FC = () => {
+  return (
+    <DataQualityProvider>
+      <DataQualityInner />
+    </DataQualityProvider>
   );
 };
 

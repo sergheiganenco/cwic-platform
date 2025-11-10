@@ -37,7 +37,31 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/data\/lineage/, '/api/lineage')
       },
+      '/assets': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
       '/catalog': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
+      '/pii-discovery': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
+      '/api/catalog': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
+      '/api/quality': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
+      '/api/pipelines': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+      },
+      '/api/data-sources': {
         target: 'http://localhost:3002',
         changeOrigin: true,
       },

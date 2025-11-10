@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import * as React from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { UniversalAIProvider } from '@/contexts/UniversalAIContext'
 
 /* -------------------------------------------------------------------------- */
 /* Types & nav items                                                          */
@@ -75,9 +76,9 @@ const NAV_HIERARCHY: ParentNavItem[] = [
     color: 'from-purple-500 to-purple-600',
     children: [
       { key: 'sources', label: 'Data Sources', to: '/data-sources', icon: Database, permission: 'read:sources' },
-      { key: 'catalog', label: 'Data Catalog', to: '/catalog', icon: BookOpen, permission: 'read:catalog' },
-      { key: 'quality', label: 'Data Quality', to: '/quality', icon: Shield, permission: 'read:quality' },
-      { key: 'lineage', label: 'Data Lineage', to: '/lineage', icon: GitBranch, permission: 'read:lineage' },
+      { key: 'catalog', label: 'Data Catalog', to: '/data-catalog', icon: BookOpen, permission: 'read:catalog' },
+      { key: 'quality', label: 'Data Quality', to: '/data-quality', icon: Shield, permission: 'read:quality' },
+      { key: 'lineage', label: 'Data Lineage', to: '/data-lineage', icon: GitBranch, permission: 'read:lineage' },
     ],
   },
   {
@@ -286,7 +287,7 @@ export default function AppLayout() {
   const onSearch = (e: React.FormEvent) => {
     e.preventDefault()
     if (!query.trim()) return
-    navigate(`/catalog?search=${encodeURIComponent(query.trim())}`)
+    navigate(`/data-catalog?search=${encodeURIComponent(query.trim())}`)
   }
 
   if (authLoading) {
@@ -591,7 +592,9 @@ export default function AppLayout() {
           {/* Main content */}
           <main id="app-main" className="flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-[1600px] p-4 sm:p-6">
-              <Outlet />
+              <UniversalAIProvider>
+                <Outlet />
+              </UniversalAIProvider>
             </div>
           </main>
 

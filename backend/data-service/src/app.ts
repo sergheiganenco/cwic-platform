@@ -323,6 +323,12 @@ export default class App {
     this.app.use('/quality', qualityIssueSummaryRouter);
     logger.info('[data-service] ✅ Quality issue summary routes mounted');
 
+    // Mount quality export routes
+    const qualityExportRouter = require('./routes/qualityExport').default;
+    this.app.use('/api/quality/export', qualityExportRouter);
+    this.app.use('/quality/export', qualityExportRouter);
+    logger.info('[data-service] ✅ Quality export routes mounted');
+
     // Mount routes with both /api prefix and without (gateway flexibility)
     const routes = [
       { path: '/data-sources', router: dataSourceRoutes },
@@ -341,6 +347,16 @@ export default class App {
       this.app.use(`/api${path}`, router);
       this.app.use(path, router);
     });
+
+    // Add module-specific stats endpoints
+    const statsCtrl = new (require('./controllers/StatsController').StatsController)();
+    this.app.get('/api/catalog/stats', async (_req, res) => statsCtrl.getCatalogStats(_req, res));
+    this.app.get('/catalog/stats', async (_req, res) => statsCtrl.getCatalogStats(_req, res));
+    this.app.get('/api/quality/metrics', async (_req, res) => statsCtrl.getQualityMetrics(_req, res));
+    this.app.get('/quality/metrics', async (_req, res) => statsCtrl.getQualityMetrics(_req, res));
+    this.app.get('/api/pipelines/stats', async (_req, res) => statsCtrl.getPipelineStats(_req, res));
+    this.app.get('/pipelines/stats', async (_req, res) => statsCtrl.getPipelineStats(_req, res));
+    logger.info('[data-service] ✅ Module-specific stats endpoints registered');
 
     // 404 handler - catch all unmatched routes
     this.app.use((req, res) => {

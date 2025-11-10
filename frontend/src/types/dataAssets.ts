@@ -47,6 +47,7 @@ export interface AssetFilters {
   classification?: Asset['classification'];
   dataSourceId?: string;
   database?: string;
+  databases?: string[];  // Added support for multiple databases
   schema?: string;
   tags?: string[];
   objectType?: 'user' | 'system';

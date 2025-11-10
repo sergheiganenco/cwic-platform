@@ -397,4 +397,98 @@ export class StatsService {
 
     return { timeframe, from: fromIso, to: nowIso, series };
   }
+
+  /**
+   * Snapshot - Returns comprehensive stats for all modules
+   * Used by /api/stats endpoint
+   */
+  async snapshot(): Promise<{
+    catalog: {
+      total: number;
+      tables: number;
+      views: number;
+      count: number; // alias for total
+    };
+    quality: {
+      overallScore: number;
+      score: number; // alias for overallScore
+      activeRules: number;
+      criticalIssues: number;
+      passRate: number;
+    };
+    pipelines: {
+      active: number;
+      running: number; // alias for active
+      completed: number;
+      failed: number;
+    };
+    timestamp: string;
+  }> {
+    try {
+      // Get catalog stats
+      const catalogRes = await this.db.query(
+        `
+        SELECT
+          COUNT(*)::int AS total,
+          SUM(CASE WHEN asset_type = 'table' THEN 1 ELSE 0 END)::int AS tables,
+          SUM(CASE WHEN asset_type = 'view' THEN 1 ELSE 0 END)::int AS views
+        FROM catalog_assets
+        WHERE NOT is_system_database(database_name)
+          AND schema_name NOT IN ('sys', 'information_schema', 'pg_catalog', 'pg_toast')
+        `
+      ) as any;
+
+      const catalogStats = catalogRes.rows?.[0] ?? { total: 0, tables: 0, views: 0 };
+
+      // Get quality stats
+      const qualityStats = await this.getQualitySummary('7d');
+
+      // Get pipeline stats (stub for now - to be implemented when pipeline service exists)
+      const pipelineRes = await this.db.query(
+        `
+        SELECT
+          COUNT(*)::int AS total,
+          SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END)::int AS active,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int AS completed,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)::int AS failed
+        FROM pipelines
+        WHERE deleted_at IS NULL
+        `
+      ).catch(() => ({ rows: [{ total: 0, active: 0, completed: 0, failed: 0 }] })) as any;
+
+      const pipelineStats = pipelineRes.rows?.[0] ?? { total: 0, active: 0, completed: 0, failed: 0 };
+
+      return {
+        catalog: {
+          total: catalogStats.total,
+          tables: catalogStats.tables,
+          views: catalogStats.views,
+          count: catalogStats.total, // alias
+        },
+        quality: {
+          overallScore: qualityStats.totals.overallScore,
+          score: qualityStats.totals.overallScore, // alias
+          activeRules: qualityStats.ruleCounts.active,
+          criticalIssues: qualityStats.totals.failed,
+          passRate: qualityStats.totals.passRate,
+        },
+        pipelines: {
+          active: pipelineStats.active,
+          running: pipelineStats.active, // alias
+          completed: pipelineStats.completed,
+          failed: pipelineStats.failed,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      console.error('Error getting snapshot:', error);
+      // Return safe defaults
+      return {
+        catalog: { total: 0, tables: 0, views: 0, count: 0 },
+        quality: { overallScore: 0, score: 0, activeRules: 0, criticalIssues: 0, passRate: 0 },
+        pipelines: { active: 0, running: 0, completed: 0, failed: 0 },
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }

@@ -6,5 +6,7 @@ import { asyncHandler } from '../middleware/error';
 const r = Router();
 const ctrl = new StatsController();
 
+// Main stats endpoint
 r.get('/', optionalAuthMiddleware, asyncHandler(ctrl.get));
+
 export default r;

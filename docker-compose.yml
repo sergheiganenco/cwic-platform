@@ -152,6 +152,8 @@ services:
       NODE_ENV: development
       PORT: 3003
       HOST: 0.0.0.0
+      IS_DOCKER: true
+      API_GATEWAY_URL: http://api-gateway:8000
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     volumes:
       - ./backend/ai-service:/app
