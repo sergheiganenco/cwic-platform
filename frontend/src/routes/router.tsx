@@ -43,27 +43,28 @@ function lazyPage(name: string) {
 }
 
 // ---------- Pages ----------
-const Dashboard     = lazyPage('Dashboard');
-const Assistant     = lazyPage('AIAssistant');
-const Analytics     = lazyPage('Analytics');
-const Reports       = lazyPage('Reports');
-const FieldDiscovery = lazyPage('FieldDiscovery');
-const Classification = lazyPage('Classification');
-const Compliance    = lazyPage('Compliance');
-const AuditLogs     = lazyPage('Audit');
-const Integrations  = lazyPage('Integrations');
-const DataCatalog   = lazyPage('DataCatalog');
-const DataQuality   = lazyPage('DataQuality');
-const DataLineage   = lazyPage('DataLineage');
-const CICDPipelines = lazyPage('Pipelines');
-const Requests      = lazyPage('Requests');
-const DataSources   = lazyPage('DataSources');
-const Governance    = lazyPage('Governance');
-const Monitoring    = lazyPage('Monitoring');
-const Settings      = lazyPage('Settings');
-const PIISettings   = lazyPage('PIISettings');
-const Users         = lazyPage('Users');
-const NotFound      = lazyPage('NotFound');
+const Dashboard        = lazyPage('Dashboard');
+const Assistant        = lazyPage('AIAssistant');
+const Analytics        = lazyPage('Analytics');
+const Reports          = lazyPage('Reports');
+const FieldDiscovery   = lazyPage('FieldDiscovery');
+const Classification   = lazyPage('Classification');
+const Compliance       = lazyPage('Compliance');
+const AuditLogs        = lazyPage('Audit');
+const Integrations     = lazyPage('Integrations');
+const DataCatalog      = lazyPage('DataCatalog');
+const DataQuality      = lazyPage('DataQuality');
+const DataLineage      = lazyPage('DataLineage');
+const CICDPipelines    = lazyPage('Pipelines');
+const WorkflowAutomation = lazyPage('WorkflowAutomation');
+const Requests         = lazyPage('Requests');
+const DataSources      = lazyPage('DataSources');
+const Governance       = lazyPage('Governance');
+const Monitoring       = lazyPage('Monitoring');
+const Settings         = lazyPage('Settings');
+const PIISettings      = lazyPage('PIISettings');
+const Users            = lazyPage('Users');
+const NotFound         = lazyPage('NotFound');
 
 // ---------- Route error boundary ----------
 function RouteErrorBoundary() {
@@ -140,6 +141,7 @@ const routes: RouteObject[] = [
       { path: 'audit',           element: withSuspense(<AuditLogs />) },
       { path: 'integrations',    element: withSuspense(<Integrations />) },
       { path: 'pipelines',       element: withSuspense(<CICDPipelines />) },
+      { path: 'workflow-automation', element: withSuspense(<WorkflowAutomation />) },
       { path: 'requests',        element: withSuspense(<Requests />) },
       { path: 'data-sources',    element: withSuspense(<DataSources />) },
       { path: 'governance',      element: withSuspense(<Governance />) },

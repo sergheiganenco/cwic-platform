@@ -4,6 +4,7 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  Brain,
   ChevronRight,
   Database,
   DollarSign,
@@ -34,6 +35,7 @@ const sections: Section[] = [
   {
     id: "operations", label: "OPERATIONS", items: [
       { to: "/pipelines", label: "Pipelines", icon: GitBranch },
+      { to: "/workflow-automation", label: "Workflow Automation", icon: Brain },
       { to: "/data-quality", label: "Data Quality", icon: Shield },
       { to: "/monitoring", label: "Monitoring", icon: Activity }
     ]
