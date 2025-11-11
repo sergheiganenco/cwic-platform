@@ -99,6 +99,7 @@ const NAV_HIERARCHY: ParentNavItem[] = [
     color: 'from-orange-500 to-orange-600',
     children: [
       { key: 'pipelines', label: 'Pipelines', to: '/pipelines', icon: Workflow, permission: 'read:pipelines' },
+      { key: 'workflow-automation', label: 'Workflow Automation', to: '/workflow-automation', icon: Brain, permission: 'read:workflows' },
       { key: 'monitoring', label: 'Monitoring', to: '/monitoring', icon: Activity, permission: 'read:monitoring' },
       { key: 'requests', label: 'Requests', to: '/requests', icon: FileCheck, permission: 'read:requests' },
     ],
